@@ -7640,6 +7640,72 @@
         "unicode-stream-parsing": {"status": "checked", "reason": "任务证据按JSON结构解析，不按文案/contains识别，不改变SSE、正文或编码语义。"},
         "verification-review": {"status": "checked", "reason": "agent-1290最终复审无Critical/Important；施工报告A/B/null/冲突/畸形证据/读取失败/保存失败等独立单点通过，362生产源编译和3283模块build成功；主控未重跑测试，真实HTTP/Redis/Cluster/多实例/浏览器和全量套件NOT_RUN。"}
       }
+    },
+    {
+      "fingerprint": "sha256:d4837b80c5c90c7bc769b3ffa0aa39d3c1976c7f7cf303799b32894e7485b9db",
+      "status": "reviewed",
+      "reason": "对三个纳管生产文件的全部暂存hunk逐一静态复核，覆盖编码/名称唯一匹配、空与null引用、单主键推断、枚举归一、目录失败及类型表单优先级；未发现剩余分级问题。",
+      "reviewedAt": "2026-11-25T15:02:59+08:00",
+      "reviewer": "Kimi Code Task 1施工上下文静态逐hunk自审（按用户要求未派遣独立reviewer）",
+      "specChanges": [
+        {
+          "change": "create_task保留defCodes/conditions.fields.fieldCode字段名，值语义扩展为编码或名称引用，解析成功后原位写回权威编码。",
+          "reason": "模型可保留已知业务引用而无需知道内部编码，宿主只处理结构化JSON且不读取用户原文。",
+          "impact": "仅创建入口在预检前canonical化；其他工具的编码语义、多配置、空条件和scopeKeys协议不变。"
+        },
+        {
+          "change": "新增CREATE_TASK_REFERENCES_UNRESOLVED与CREATE_TASK_REFERENCE_RESOLUTION_FAILED阻断码，分别处理可收集未决和目录/JSON解析失败。",
+          "reason": "零命中、多命中、空引用与基础设施失败必须可区分，且均不得进入预检或创建HITL。",
+          "impact": "本任务以既有pending终态零业务副作用阻断；Task 2将把未决分支替换为创建前表单，失败分支保持失败关闭。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/CreateTaskReferenceResolver.java",
+          "status": "checked",
+          "reason": "新增结构化定义/字段/枚举解析器，使用不可变结果列表并保留未决原参数；所有方法满足50行和复杂度20门槛，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "setter接入解析器，合法类型才解析，RESOLVED写回pending，UNRESOLVED/FAILED在ConditionsForm、预检和确认门前阻断；触及方法规模合规，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java",
+          "status": "checked",
+          "reason": "仅同步create_task的配置引用和fieldCode=null值契约，保留多配置、条件草案和HITL说明，无执行逻辑变化；已IDEA Reformat。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用现有Jackson ObjectMapper、Apache StringUtils、DefinitionCatalog和SlotDefinition快照，无新增依赖、工具框架或模型调用。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "返回集合均非null且record做不可变副本，控制分支显式大括号，List首尾用getFirst，无通配import；新增及触及Java方法均不超过50行/复杂度20。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "目录和JSON异常以WARN保留Throwable，不记录原始参数；模型/用户结果只含稳定业务码和通用说明，不回传异常消息或堆栈。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "本批不新增卡片或前端文案体系，未决与失败通过既有工具结果呈现，创建确认门及后续表单边界不变。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "复用既有pending终态、预检和HITL顺序，未新增Redis键、TTL或并发状态；DefinitionCatalog只读业务定义，不存在AI会话数据库访问。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "仅在完整argumentsJson上由Jackson解析JSON树，不处理用户文本、SSE分片或字节解码，不改变Unicode和流式语义。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "七个计划方法均有独立RED/GREEN证据，追加null空引用断言完成RED到GREEN；IDEA定向build无问题且Maven实际编译363个生产源成功；clean曾因既有jar被占用失败，随后compile重编成功；全量套件、真实模型、Redis Cluster和多实例NOT_RUN。"
+        }
+      }
     }
   ]
 }

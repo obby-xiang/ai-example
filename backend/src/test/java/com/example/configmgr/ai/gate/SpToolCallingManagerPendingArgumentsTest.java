@@ -6,9 +6,14 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.slot.DefinitionCatalog;
+import com.example.configmgr.ai.slot.SlotDefinition;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.example.configmgr.common.ResourceNotFoundException;
@@ -18,17 +23,32 @@ import com.example.configmgr.definition.entity.ConfigField;
 import com.example.configmgr.definition.service.DefinitionService;
 import com.example.configmgr.job.service.JobService;
 import com.example.configmgr.task.repo.TaskFileRepository;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class SpToolCallingManagerPendingArgumentsTest {
@@ -39,13 +59,31 @@ class SpToolCallingManagerPendingArgumentsTest {
 
     private ToolPreflightService preflight;
 
+    private ToolPreflightService preflightProbe;
+
+    private RunStore store;
+
+    private RunRegistry registry;
+
+    private ConfirmGate gate;
+
+    private ToolRegistry toolRegistry;
+
+    private MessageJsonCodec codec;
+
     @BeforeEach
     void setUp() {
-        this.manager = new SpToolCallingManager(mock(RunStore.class), mock(RunRegistry.class), mock(ConfirmGate.class),
-                mock(ToolRegistry.class), mock(MessageJsonCodec.class), mock(ToolActivityBeacon.class),
-                mock(CancellationRegistry.class), new ToolResultLimiter(new AiProperties()), List.of());
+        this.store = mock(RunStore.class);
+        this.registry = mock(RunRegistry.class);
+        this.gate = mock(ConfirmGate.class);
+        this.toolRegistry = mock(ToolRegistry.class);
+        this.codec = mock(MessageJsonCodec.class);
+        this.preflightProbe = mock(ToolPreflightService.class);
+        this.manager = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry,
+                this.codec, mock(ToolActivityBeacon.class), mock(CancellationRegistry.class),
+                new ToolResultLimiter(new AiProperties()), List.of(), this.preflightProbe);
         DefinitionService definitionService = mock(DefinitionService.class);
-        when(definitionService.findByCode(org.mockito.ArgumentMatchers.anyString())).thenAnswer(invocation -> {
+        when(definitionService.findByCode(anyString())).thenAnswer(invocation -> {
             if ("CURRENCY".equals(invocation.getArgument(0))) {
                 return currencyDefinition();
             }
@@ -98,11 +136,53 @@ class SpToolCallingManagerPendingArgumentsTest {
     }
 
     @Test
-    void exportEmptyConditionsRemainExplicitlyUndecided() {
-        String original = "{\"type\":\"EXPORT\",\"conditions\":{}}";
-        PendingToolCall pending = bind(original, "导出CNY货币字典");
+    void referencesAreCanonicalBeforePreflight() {
+        installResolver(() -> List.of(currencySlot()));
+        AtomicReference<String> preflightArguments = new AtomicReference<>();
+        when(this.preflightProbe.inspect(eq("create_task"), anyString(), any(AiContext.class))).thenAnswer(invocation -> {
+            preflightArguments.set(invocation.getArgument(1));
+            return failingReport();
+        });
+        execute("{\"type\":\"EXPORT\",\"defCodes\":[\"货币字典\"],\"conditions\":{\"fields\":[{\"fieldCode\":null,\"operator\":\"EQ\",\"value\":\"CNY\"}]}}");
+
+        JsonNode canonical = read(preflightArguments.get());
+        assertThat(canonical.path("defCodes").get(0).asText()).isEqualTo("CURRENCY");
+        assertThat(canonical.path("conditions").path("fields").get(0).path("fieldCode").asText()).isEqualTo("code");
+        assertThat(canonical.path("conditions").path("fields").get(0).path("value").asText()).isEqualTo("CNY");
+        verify(this.preflightProbe).inspect(eq("create_task"), anyString(), any(AiContext.class));
+        verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+    }
+
+    @Test
+    void unresolvedReferencesDoNotReachPreflightOrHitl() {
+        installResolver(() -> List.of(currencySlot()));
+        String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"未知字典\"],\"conditions\":{}}";
+        execute(original);
+
+        verifyNoInteractions(this.preflightProbe);
+        verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+        PendingToolCall pending = capturedPending();
+        assertThat(pending.getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
+        assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
         assertThat(pending.getArguments()).isEqualTo(original);
-        assertThat(this.preflight.inspect("create_task", pending.getArguments(), AiContext.empty()).pass()).isTrue();
+        assertThat(pending.isExecuted()).isFalse();
+    }
+
+    @Test
+    void catalogFailureDoesNotReachPreflightOrHitl() {
+        installResolver(() -> {
+            throw new IllegalStateException("catalog unavailable");
+        });
+        String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{}}";
+        execute(original);
+
+        verifyNoInteractions(this.preflightProbe);
+        verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+        PendingToolCall pending = capturedPending();
+        assertThat(pending.getCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
+        assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+        assertThat(pending.getArguments()).isEqualTo(original);
+        assertThat(pending.isExecuted()).isFalse();
     }
 
     @Test
@@ -156,6 +236,48 @@ class SpToolCallingManagerPendingArgumentsTest {
         ReflectionTestUtils.invokeMethod(this.manager, "bindPendingArguments", "run-pending-arguments", AiContext.empty(),
                 prompt, null, List.of(pending));
         return pending;
+    }
+
+    private void installResolver(DefinitionCatalog catalog) {
+        ReflectionTestUtils.setField(this.manager, "createTaskReferenceResolver",
+                new CreateTaskReferenceResolver(catalog, this.mapper));
+    }
+
+    private void execute(String arguments) {
+        String runId = "run-pending-arguments";
+        RunSnapshot snapshot = new RunSnapshot();
+        snapshot.setRunId(runId);
+        snapshot.setSessionId("session-pending-arguments");
+        snapshot.setStatus(RunSnapshot.RUNNING);
+        snapshot.setContext(AiContext.empty().toMap());
+        when(this.store.get(runId)).thenReturn(snapshot);
+        when(this.registry.of(runId)).thenReturn(mock(SseChatEmitter.class));
+        when(this.codec.serializeAll(anyList())).thenReturn(List.of("[]"));
+        when(this.toolRegistry.channelOf("create_task")).thenReturn(ToolMeta.Channel.BACKEND);
+        when(this.toolRegistry.riskOf("create_task")).thenReturn(ToolMeta.RiskLevel.DANGER);
+        when(this.toolRegistry.isContextMatched(eq("create_task"), any(AiContext.class))).thenReturn(true);
+        ToolCallingChatOptions options = ToolCallingChatOptions.builder().toolContext(Map.of("runId", runId)).build();
+        Prompt prompt = new Prompt(List.of(new UserMessage("structured arguments only")), options);
+        AssistantMessage assistant = AssistantMessage.builder().toolCalls(List.of(
+                new AssistantMessage.ToolCall("call-create", "function", "create_task", arguments))).build();
+        this.manager.executeToolCalls(prompt, new ChatResponse(List.of(new Generation(assistant))));
+    }
+
+    private PendingToolCall capturedPending() {
+        ArgumentCaptor<PendingToolCall> captor = ArgumentCaptor.forClass(PendingToolCall.class);
+        verify(this.store).putPending(eq("run-pending-arguments"), captor.capture());
+        return captor.getValue();
+    }
+
+    private static ToolPreflightService.PreflightReport failingReport() {
+        return new ToolPreflightService.PreflightReport(false, Map.of("type", "EXPORT"), List.of(
+                new ToolPreflightService.PreflightReport.Check("configuration references", false, "stop after capture")),
+                "stop after capture", "", null, "reference-test");
+    }
+
+    private static SlotDefinition currencySlot() {
+        return new SlotDefinition("CURRENCY", "货币字典", List.of(
+                new SlotDefinition.SlotField("code", "货币代码", true, List.of("CNY", "USD"))));
     }
 
     private com.fasterxml.jackson.databind.JsonNode read(String arguments) {

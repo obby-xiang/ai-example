@@ -457,6 +457,13 @@ public class SpToolCallingManager implements ToolCallingManager {
         this.taskTypeForm = form;
     }
 
+    private CreateTaskReferenceResolver createTaskReferenceResolver;
+
+    @Autowired(required = false)
+    public void setCreateTaskReferenceResolver(CreateTaskReferenceResolver resolver) {
+        this.createTaskReferenceResolver = resolver;
+    }
+
     public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
                                 MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
                                 ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
@@ -935,8 +942,30 @@ public class SpToolCallingManager implements ToolCallingManager {
     private void bindPendingArguments(String runId, AiContext context, Prompt prompt, AssistantMessage assistant,
                                       List<PendingToolCall> pendings) {
         for (PendingToolCall pending : pendings) {
+            resolveCreateTaskReferences(runId, pending);
+            if (isCreateTaskReferenceBlocked(pending)) {
+                continue;
+            }
             com.example.configmgr.ai.form.ConditionsForm.bindDraft(pending, runId, context);
         }
+    }
+
+    private void resolveCreateTaskReferences(String runId, PendingToolCall pending) {
+        if (this.createTaskReferenceResolver == null || !TOOL_CREATE_TASK.equals(pending.getName())
+                || com.example.configmgr.ai.form.TaskTypeForm.typeMissingOrInvalid(pending.getArguments())) {
+            return;
+        }
+        CreateTaskReferenceResolver.Resolution resolution = this.createTaskReferenceResolver.resolve(pending.getArguments());
+        if (resolution.status() == CreateTaskReferenceResolver.Status.RESOLVED) {
+            pending.setArguments(resolution.canonicalArguments());
+            return;
+        }
+        blockCreateTaskReferences(runId, pending, resolution);
+    }
+
+    private static boolean isCreateTaskReferenceBlocked(PendingToolCall pending) {
+        return CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode())
+                || CreateTaskReferenceResolver.FAILED_CODE.equals(pending.getCode());
     }
 
     private void prepareBatch(ToolBatchState state, List<PendingToolCall> pendings) {
@@ -1000,6 +1029,10 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private boolean isPreflightBlocked(ToolBatchState state, PendingToolCall pending) {
+        if (isCreateTaskReferenceBlocked(pending)) {
+            state.preflightBlocked.add(pending.getToolCallId());
+            return true;
+        }
         if (state.budgetArmed || this.preflight == null || !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
                 || !ToolPreflightService.isSupported(pending.getName())
                 || !this.toolRegistry.isContextMatched(pending.getName(), state.context)) {
@@ -2549,6 +2582,27 @@ public class SpToolCallingManager implements ToolCallingManager {
             throw new StreamViolationException(StreamViolationException.STATE_UNAVAILABLE,
                     "Cancellation state unknown (Redis read failed); tool execution stopped at an event boundary (runId=" + runId + ")");
         }
+    }
+
+    private void blockCreateTaskReferences(String runId, PendingToolCall pending,
+                                           CreateTaskReferenceResolver.Resolution resolution) {
+        long now = System.currentTimeMillis();
+        String code = resolution.failureCode();
+        String text = code + (CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(code)
+                ? "：创建参数中的配置、字段或枚举引用尚未唯一解析，本次未进入预检或确认门、未执行。"
+                : "：创建参数引用解析失败，本次未进入预检或确认门、未执行。");
+        pending.setStatus(PendingToolCall.PRECHECK_FAILED);
+        pending.setOutcome(ToolOutcome.FAILED.wire());
+        pending.setCode(code);
+        pending.setReason(code);
+        pending.setExecuted(false);
+        pending.setExecutedBy(null);
+        pending.setRequestedAtMs(now);
+        pending.setResolvedAtMs(now);
+        pending.setResultText(text);
+        this.store.putPending(runId, pending);
+        log.warn("create_task reference resolution blocked before preflight and confirm gate runId={} code={} unresolvedCount={}",
+                runId, code, resolution.unresolved().size());
     }
 
     /**
