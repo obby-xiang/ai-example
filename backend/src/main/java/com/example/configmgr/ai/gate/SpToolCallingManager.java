@@ -923,7 +923,8 @@ public class SpToolCallingManager implements ToolCallingManager {
         assistant = ReasoningOrigin.stamp(assistant, snapshot.getProviderId(), snapshot.getModelId());
         List<PendingToolCall> pendings = newPendings(assistant);
         AiContext context = AiContext.fromMap(snapshot.getContext());
-        bindPendingArguments(runId, context, prompt, assistant, pendings);
+        Map<String, CreateTaskReferenceResolver.Resolution> createTaskResolutions = bindPendingArguments(runId, context,
+                prompt, assistant, pendings);
         ModelWriteBudget modelBudget = modelWriteBudget(snapshot, prompt, assistant, pendings.size());
         boolean budgetArmed = this.beacon.isBudgetArmed(runId);
         if (budgetArmed) {
@@ -933,7 +934,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         ToolBatchState state = new ToolBatchState(runId, snapshot, prompt, assistant, context, out, modelBudget,
                 budgetArmed);
         state.pendings = pendings;
-        prepareBatch(state, pendings);
+        prepareBatch(state, pendings, createTaskResolutions);
         prepareSuspension(state, pendings);
         List<String> gateWaitIds = budgetArmed ? List.of() : gateWaitToolCallIds(state.suspended);
         this.gate.arm(runId, gateWaitIds);
@@ -946,37 +947,44 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
     }
 
-    private void bindPendingArguments(String runId, AiContext context, Prompt prompt, AssistantMessage assistant,
-                                      List<PendingToolCall> pendings) {
+    private Map<String, CreateTaskReferenceResolver.Resolution> bindPendingArguments(String runId, AiContext context,
+                                                                                    Prompt prompt,
+                                                                                    AssistantMessage assistant,
+                                                                                    List<PendingToolCall> pendings) {
+        Map<String, CreateTaskReferenceResolver.Resolution> resolutions = new LinkedHashMap<>();
         for (PendingToolCall pending : pendings) {
-            resolveCreateTaskReferences(runId, pending);
+            CreateTaskReferenceResolver.Resolution resolution = resolveCreateTaskReferences(runId, pending);
+            if (resolution != null) {
+                resolutions.put(pending.getToolCallId(), resolution);
+            }
             if (isCreateTaskReferenceBlocked(pending)) {
                 continue;
             }
             com.example.configmgr.ai.form.ConditionsForm.bindDraft(pending, runId, context);
         }
+        return resolutions;
     }
 
-    private void resolveCreateTaskReferences(String runId, PendingToolCall pending) {
+    private CreateTaskReferenceResolver.Resolution resolveCreateTaskReferences(String runId, PendingToolCall pending) {
         if (!TOOL_CREATE_TASK.equals(pending.getName())
                 || com.example.configmgr.ai.form.TaskTypeForm.typeMissingOrInvalid(pending.getArguments())) {
-            return;
+            return null;
         }
         if (this.createTaskReferenceResolver == null) {
-            blockCreateTaskReferences(runId, pending, new CreateTaskReferenceResolver.Resolution(
+            CreateTaskReferenceResolver.Resolution resolution = new CreateTaskReferenceResolver.Resolution(
                     CreateTaskReferenceResolver.Status.FAILED, pending.getArguments(), List.of(),
-                    CreateTaskReferenceResolver.FAILED_CODE));
-            return;
+                    CreateTaskReferenceResolver.FAILED_CODE);
+            blockCreateTaskReferences(runId, pending, resolution);
+            return resolution;
         }
         CreateTaskReferenceResolver.Resolution resolution = this.createTaskReferenceResolver.resolve(pending.getArguments());
         if (resolution.status() == CreateTaskReferenceResolver.Status.RESOLVED) {
             pending.setArguments(resolution.canonicalArguments());
-            return;
         }
-        if (resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED) {
-            return;
+        else if (resolution.status() == CreateTaskReferenceResolver.Status.FAILED) {
+            blockCreateTaskReferences(runId, pending, resolution);
         }
-        blockCreateTaskReferences(runId, pending, resolution);
+        return resolution;
     }
 
     private static boolean isCreateTaskReferenceBlocked(PendingToolCall pending) {
@@ -984,14 +992,16 @@ public class SpToolCallingManager implements ToolCallingManager {
                 || CreateTaskReferenceResolver.FAILED_CODE.equals(pending.getCode());
     }
 
-    private void prepareBatch(ToolBatchState state, List<PendingToolCall> pendings) {
+    private void prepareBatch(ToolBatchState state, List<PendingToolCall> pendings,
+                              Map<String, CreateTaskReferenceResolver.Resolution> createTaskResolutions) {
         for (PendingToolCall pending : pendings) {
-            preparePending(state, pending, pendings.size());
+            preparePending(state, pending, pendings.size(), createTaskResolutions.get(pending.getToolCallId()));
         }
     }
 
-    private void preparePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
-        parkCreateTaskDetailsIfDue(state, pending, batchSize);
+    private void preparePending(ToolBatchState state, PendingToolCall pending, int batchSize,
+                                CreateTaskReferenceResolver.Resolution createTaskResolution) {
+        parkCreateTaskDetailsIfDue(state, pending, batchSize, createTaskResolution);
         parkTaskTypeIfDue(state, pending, batchSize);
         if (isConditionRejected(state, pending, batchSize) || isPreflightBlocked(state, pending)
                 || isCreateTaskBlocked(state, pending) || isFrontendSkipped(state, pending)) {
@@ -1000,29 +1010,32 @@ public class SpToolCallingManager implements ToolCallingManager {
         state.suspended.add(pending);
     }
 
-    private void parkCreateTaskDetailsIfDue(ToolBatchState state, PendingToolCall pending, int batchSize) {
-        if (state.budgetArmed || this.createTaskReferenceResolver == null || batchSize != 1
-                || !TOOL_CREATE_TASK.equals(pending.getName()) || !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
-                || com.example.configmgr.ai.form.TaskTypeForm.typeMissingOrInvalid(pending.getArguments())) {
+    private void parkCreateTaskDetailsIfDue(ToolBatchState state, PendingToolCall pending, int batchSize,
+                                            CreateTaskReferenceResolver.Resolution resolution) {
+        if (resolution == null || resolution.status() != CreateTaskReferenceResolver.Status.UNRESOLVED) {
             return;
         }
-        CreateTaskReferenceResolver.Resolution resolution = this.createTaskReferenceResolver.resolve(pending.getArguments());
-        if (resolution.status() != CreateTaskReferenceResolver.Status.UNRESOLVED) {
-            return;
-        }
-        if (this.createTaskDetailsForm != null) {
-            List<Message> detailsHistory = new ArrayList<>(state.prompt.getInstructions());
-            String assistantBody = StringUtils.defaultString(state.assistant.getText());
-            if (this.createTaskDetailsForm.parkIfUnresolved(state.runId, pending.getToolCallId(), pending.getArguments(),
-                    resolution, detailsHistory, assistantBody, state.assistant.getMetadata())) {
-                commitTurnText(state.prompt);
-                recordParkedHostFormTranscript(state.runId, state.prompt, state.assistant);
-                throw new RunParkedException(state.runId,
-                        com.example.configmgr.ai.form.CreateTaskDetailsForm.toolCallId(pending.getToolCallId()),
-                        PendingToolCall.KIND_FRONTEND);
-            }
+        boolean eligible = !state.budgetArmed && batchSize == 1 && this.createTaskDetailsForm != null
+                && PendingToolCall.KIND_CONFIRM.equals(pending.getKind());
+        if (eligible && parkCreateTaskDetails(state, pending, resolution)) {
+            throw new RunParkedException(state.runId,
+                    com.example.configmgr.ai.form.CreateTaskDetailsForm.toolCallId(pending.getToolCallId()),
+                    PendingToolCall.KIND_FRONTEND);
         }
         blockCreateTaskReferences(state.runId, pending, resolution);
+    }
+
+    private boolean parkCreateTaskDetails(ToolBatchState state, PendingToolCall pending,
+                                          CreateTaskReferenceResolver.Resolution resolution) {
+        List<Message> detailsHistory = new ArrayList<>(state.prompt.getInstructions());
+        String assistantBody = StringUtils.defaultString(state.assistant.getText());
+        boolean parked = this.createTaskDetailsForm.parkIfUnresolved(state.runId, pending.getToolCallId(),
+                pending.getArguments(), resolution, detailsHistory, assistantBody, state.assistant.getMetadata());
+        if (parked) {
+            commitTurnText(state.prompt);
+            recordParkedHostFormTranscript(state.runId, state.prompt, state.assistant);
+        }
+        return parked;
     }
 
     private void parkTaskTypeIfDue(ToolBatchState state, PendingToolCall pending, int batchSize) {
@@ -3902,7 +3915,9 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (!inspectResumedCreateTask(runId, context, createTask)) {
             return settledCreateTask(merged, resolution, createTask);
         }
-        parkResumedCreateTask(runId, history, createTask);
+        if (!this.createTaskDetailsForm.parkCreateTaskConfirmation(runId, createTask, history)) {
+            return settledCreateTask(merged, resolution, createTask);
+        }
         return new CreateTaskDetailsResume(CreateTaskDetailsResumeStatus.PARKED, merged, resolution, createTask);
     }
 
@@ -3924,19 +3939,6 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
         createTask.setPreflight(report.asMap());
         return true;
-    }
-
-    private void parkResumedCreateTask(String runId, List<Message> history, PendingToolCall createTask) {
-        RunSnapshot snapshot = this.store.get(runId);
-        String content = snapshot == null ? null : snapshot.getAssistantContent();
-        Map<String, Object> metadata = snapshot == null ? null : snapshot.getAssistantMetadata();
-        this.store.saveSuspended(runId, content, this.registry.of(runId).transcriptFullText(), List.of(createTask),
-                history, this.codec, metadata);
-        SseChatEmitter out = this.registry.of(runId);
-        out.suspended(List.of(createTask), this.store.runKey(runId), this.store.pendingKey(runId), this.store.instanceId());
-        out.toolStart(createTask);
-        this.gate.publishRequestsForParkedBatch(runId, List.of(createTask));
-        out.completeSubscriptions();
     }
 
     private static CreateTaskDetailsResume settledCreateTask(String merged,

@@ -249,7 +249,7 @@ abstract class HostForm {
     /**
      * 挂起失败后的尽力收敛：把条目落成"未执行"的终态，避免它永远以 PENDING 挡住续跑。
      */
-    private void convergeAfterParkFailure(String runId, PendingToolCall pending, RuntimeException cause) {
+    protected void convergeAfterParkFailure(String runId, PendingToolCall pending, RuntimeException cause) {
         log.warn("could not persist host form park (not parked this tick; continue on existing path) runId={} toolCallId={}", runId,
                 pending.getToolCallId(), cause);
         try {

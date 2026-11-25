@@ -7,7 +7,9 @@ import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.ReplyLanguage;
 import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
+import com.example.configmgr.ai.run.SseChatEmitter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -48,9 +50,10 @@ public class CreateTaskDetailsForm extends HostForm {
         return TOOL_CALL_ID_PREFIX + createTaskToolCallId;
     }
 
-    public static String nextToolCallId(String createTaskToolCallId, String arguments) {
+    public static String nextToolCallId(String createTaskToolCallId, String currentFormToolCallId, String arguments) {
+        String generation = StringUtils.defaultString(currentFormToolCallId) + "\n" + StringUtils.defaultString(arguments);
         return toolCallId(createTaskToolCallId) + "-"
-                + UUID.nameUUIDFromBytes(StringUtils.defaultString(arguments).getBytes(StandardCharsets.UTF_8));
+                + UUID.nameUUIDFromBytes(generation.getBytes(StandardCharsets.UTF_8));
     }
 
     public boolean parkIfUnresolved(String runId, String createTaskToolCallId, String createTaskArguments,
@@ -65,10 +68,10 @@ public class CreateTaskDetailsForm extends HostForm {
                 assistantMetadata, toolCallId(createTaskToolCallId));
     }
 
-    public boolean parkNextUnresolved(String runId, String createTaskToolCallId, String createTaskArguments,
-            CreateTaskReferenceResolver.Resolution resolution, List<Message> history) {
+    public boolean parkNextUnresolved(String runId, String currentFormToolCallId, String createTaskToolCallId,
+            String createTaskArguments, CreateTaskReferenceResolver.Resolution resolution, List<Message> history) {
         return parkUnresolved(runId, createTaskToolCallId, createTaskArguments, resolution, history, null, null,
-                nextToolCallId(createTaskToolCallId, createTaskArguments));
+                nextToolCallId(createTaskToolCallId, currentFormToolCallId, createTaskArguments));
     }
 
     private boolean parkUnresolved(String runId, String createTaskToolCallId, String createTaskArguments,
@@ -143,6 +146,52 @@ public class CreateTaskDetailsForm extends HostForm {
         option.put("value", value);
         option.put("label", value);
         return option;
+    }
+
+    public boolean parkCreateTaskConfirmation(String runId, PendingToolCall createTask, List<Message> history) {
+        RunSnapshot snapshot = this.store.get(runId);
+        String content = snapshot == null ? null : snapshot.getAssistantContent();
+        Map<String, Object> metadata = snapshot == null ? null : snapshot.getAssistantMetadata();
+        try {
+            this.store.saveSuspended(runId, content, this.registry.of(runId).transcriptFullText(), List.of(createTask),
+                    history, this.codec, metadata);
+        }
+        catch (RuntimeException ex) {
+            convergeAfterParkFailure(runId, createTask, ex);
+            return false;
+        }
+        return publishCreateTaskConfirmation(runId, createTask);
+    }
+
+    private boolean publishCreateTaskConfirmation(String runId, PendingToolCall createTask) {
+        SseChatEmitter out;
+        try {
+            out = this.registry.of(runId);
+            out.suspended(List.of(createTask), this.store.runKey(runId), this.store.pendingKey(runId),
+                    this.store.instanceId());
+            out.toolStart(createTask);
+        }
+        catch (RuntimeException ex) {
+            log.warn("create task confirmation parked but initial frame publication failed runId={} toolCallId={}",
+                    runId, createTask.getToolCallId(), ex);
+            return true;
+        }
+        try {
+            this.gate.publishRequestsForParkedBatch(runId, List.of(createTask));
+        }
+        catch (RuntimeException ex) {
+            log.warn("create task confirmation parked but request publication failed runId={} toolCallId={}",
+                    runId, createTask.getToolCallId(), ex);
+            return true;
+        }
+        try {
+            out.completeSubscriptions();
+        }
+        catch (RuntimeException ex) {
+            log.warn("create task confirmation stream close failed; park remains intact runId={} toolCallId={}",
+                    runId, createTask.getToolCallId(), ex);
+        }
+        return true;
     }
 
     public static boolean isCreateTaskDetails(PendingToolCall pending) {

@@ -1515,9 +1515,10 @@ public class ResumeService {
 
     private ResumeResult parkNextCreateTaskDetails(ResumeState state,
             SpToolCallingManager.CreateTaskDetailsResume result) {
-        String originalCall = state.snapshot.getInFlightToolCalls().getFirst().getCreateTaskToolCallId();
+        PendingToolCall current = state.snapshot.getInFlightToolCalls().getFirst();
+        String originalCall = current.getCreateTaskToolCallId();
         if (this.createTaskDetailsForm != null && this.createTaskDetailsForm.parkNextUnresolved(state.runId,
-                originalCall, result.mergedArguments(), result.resolution(), state.history)) {
+                current.getToolCallId(), originalCall, result.mergedArguments(), result.resolution(), state.history)) {
             state.body.put("reason", "CREATE_TASK_DETAILS_PARKED");
             return new ResumeResult(Outcome.ACCEPTED, state.body);
         }

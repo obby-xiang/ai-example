@@ -7909,6 +7909,77 @@
           "reason": "六个指定方法均先取得缺CreateTaskDetailsForm的预期RED并逐个GREEN；最终IDEA Reformat成功、Maven compile成功、npm run build成功；前端仅有既有stores/ai.ts混合导入警告，全量套件、真实Redis/Cluster、多实例、真实模型与浏览器NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:0e34df2a4b97a316e1d0bfb49b6d6328cd215ba58fd328b7b6b3b85732571401",
+      "status": "reviewed",
+      "reason": "对Task 2审查返修的四个纳管生产文件全部暂存hunk逐一静态复核，确认多工具未决失败关闭、单次权威Resolution、确认挂起失败收敛和跨代详情卡身份均有实现及独立回归覆盖。",
+      "reviewedAt": "2026-11-25T17:06:41+08:00",
+      "reviewer": "Kimi Code Task 2 fix round 1施工上下文静态逐hunk自审（未派遣独立reviewer）",
+      "specChanges": [
+        {
+          "change": "每个create_task在参数绑定阶段只计算一次Resolution并随pending传到准备阶段；UNRESOLVED仅允许合格单调用进入详情表单，其余批次、预算和通道形态一律按UNRESOLVED失败关闭。",
+          "reason": "审查发现重复目录读取会混淆状态迁移，且多工具批次绕过未决码后可能进入预检/HITL。",
+          "impact": "RESOLVED只写回本次canonical参数，FAILED只阻断，UNRESOLVED只选择表单或阻断；不再发生第二次catalog读取。"
+        },
+        {
+          "change": "已解析恢复通过CreateTaskDetailsForm的HostForm失败安全协议挂起原创建确认卡；后续未决卡ID同时包含当前表单ID与合并参数。",
+          "reason": "直接saveSuspended/SSE缺少部分写与发帧收敛，原successor ID会在相同歧义值或循环输入时复用终态。",
+          "impact": "存储失败把原创建收敛为HOST_FORM_PARK_FAILED且未执行；请求发布失败保留可恢复快照且不驱动模型；新提交得到新卡，重复回执仍由PENDING_UNRESOLVED幂等处理。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/CreateTaskDetailsForm.java",
+          "status": "checked",
+          "reason": "successor UUID加入当前表单代次；新增原创建确认挂起入口，存储失败复用protected收敛，初始帧、请求帧和收流异常分别按HostForm语义收口；已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/HostForm.java",
+          "status": "checked",
+          "reason": "仅将既有convergeAfterParkFailure开放给子类复用，原日志、BLOCKED/HOST_FORM_PARK_FAILED与putPending行为未改；已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "绑定返回按原调用ID索引的唯一Resolution，准备阶段不再读catalog；所有UNRESOLVED在不合格时阻断，恢复确认挂起交由详情表单安全入口；触及方法规模合规，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java",
+          "status": "checked",
+          "reason": "未决后续卡显式传当前in-flight表单ID与原创建ID，保持新提交可纠正及重复回执幂等；已IDEA Reformat。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用既有LinkedHashMap、HostForm、ConfirmGate和JDK UUID，无新增依赖、用户文本解析或模型调用。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "Resolution map每次调用有界且非null返回，分支显式大括号，方法均低于50行/复杂度20；仅调整一个既有方法可见性，无JSON或集合契约扩张。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "存储与发布异常以WARN保留Throwable且只记录runId/toolCallId，失败结果使用既有安全码，不向用户或模型暴露异常原文。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "本批不修改前端、文案或控件；重复歧义仍使用既有通用详情卡，失败不制造虚假确认或创建状态。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "所有UNRESOLVED均有唯一终局或真实挂起，部分存储写会收敛，发布失败不驱动模型；代次ID避免终态复活，未新增Redis键、TTL或数据库访问。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "代次输入仅以UTF-8完整字节计算UUID，JSON和SSE编码路径未变，不涉及代理对截断或分片解析。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "五个新增回归分别取得预期RED并独立GREEN，原六个受影响方法也逐个GREEN；IDEA Reformat、Maven compile及npm run build成功，前端保留既有混合导入警告，真实Redis/多实例/模型/浏览器NOT_RUN。"
+        }
+      }
     }
   ]
 }

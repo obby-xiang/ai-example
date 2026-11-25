@@ -1,6 +1,7 @@
 package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.form.CreateTaskDetailsForm;
 import com.example.configmgr.ai.form.TaskTypeForm;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -45,6 +46,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -172,6 +174,52 @@ class SpToolCallingManagerPendingArgumentsTest {
     }
 
     @Test
+    void unresolvedCreateTaskInMultiToolBatchFailsClosedBeforePreflightOrHitl() {
+        installResolver(() -> List.of(currencySlot()));
+        when(this.preflightProbe.inspect(eq("create_task"), anyString(), any(AiContext.class)))
+                .thenReturn(failingReport());
+        String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"未知字典\"],\"conditions\":{}}";
+
+        executeCalls(
+                new AssistantMessage.ToolCall("call-create", "function", "create_task", original),
+                new AssistantMessage.ToolCall("call-create-2", "function", "create_task", original));
+
+        verifyNoInteractions(this.preflightProbe);
+        verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+        ArgumentCaptor<PendingToolCall> captor = ArgumentCaptor.forClass(PendingToolCall.class);
+        verify(this.store, atLeastOnce()).putPending(eq("run-pending-arguments"), captor.capture());
+        PendingToolCall pending = captor.getAllValues().stream()
+                .filter(entry -> "call-create".equals(entry.getToolCallId())).findFirst().orElseThrow();
+        assertThat(pending.getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
+        assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+        assertThat(pending.getArguments()).isEqualTo(original);
+        assertThat(pending.isExecuted()).isFalse();
+    }
+
+    @Test
+    void createTaskResolutionIsComputedOnceAndPassedToDetailsForm() {
+        CreateTaskReferenceResolver resolver = mock(CreateTaskReferenceResolver.class);
+        String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"未知字典\"],\"conditions\":{}}";
+        CreateTaskReferenceResolver.Resolution unresolved = new CreateTaskReferenceResolver.Resolution(
+                CreateTaskReferenceResolver.Status.UNRESOLVED, original, List.of(
+                        new CreateTaskReferenceResolver.UnresolvedReference(CreateTaskReferenceResolver.Kind.DEFINITION,
+                                0, -1, "未知字典", List.of())),
+                CreateTaskReferenceResolver.UNRESOLVED_CODE);
+        when(resolver.resolve(original)).thenReturn(unresolved);
+        CreateTaskDetailsForm detailsForm = mock(CreateTaskDetailsForm.class);
+        ReflectionTestUtils.setField(this.manager, "createTaskReferenceResolver", resolver);
+        this.manager.setCreateTaskDetailsForm(detailsForm);
+
+        execute(original);
+
+        verify(resolver).resolve(original);
+        verify(detailsForm).parkIfUnresolved(eq("run-pending-arguments"), eq("call-create"), eq(original),
+                eq(unresolved), anyList(), anyString(), any());
+        verifyNoInteractions(this.preflightProbe);
+        assertThat(capturedPending().getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
+    }
+
+    @Test
     void catalogFailureDoesNotReachPreflightOrHitl() {
         installResolver(() -> {
             throw new IllegalStateException("catalog unavailable");
@@ -294,6 +342,10 @@ class SpToolCallingManagerPendingArgumentsTest {
     }
 
     private void execute(String arguments) {
+        executeCalls(new AssistantMessage.ToolCall("call-create", "function", "create_task", arguments));
+    }
+
+    private void executeCalls(AssistantMessage.ToolCall... calls) {
         String runId = "run-pending-arguments";
         RunSnapshot snapshot = new RunSnapshot();
         snapshot.setRunId(runId);
@@ -308,8 +360,7 @@ class SpToolCallingManagerPendingArgumentsTest {
         when(this.toolRegistry.isContextMatched(eq("create_task"), any(AiContext.class))).thenReturn(true);
         ToolCallingChatOptions options = ToolCallingChatOptions.builder().toolContext(Map.of("runId", runId)).build();
         Prompt prompt = new Prompt(List.of(new UserMessage("structured arguments only")), options);
-        AssistantMessage assistant = AssistantMessage.builder().toolCalls(List.of(
-                new AssistantMessage.ToolCall("call-create", "function", "create_task", arguments))).build();
+        AssistantMessage assistant = AssistantMessage.builder().toolCalls(List.of(calls)).build();
         this.manager.executeToolCalls(prompt, new ChatResponse(List.of(new Generation(assistant))));
     }
 

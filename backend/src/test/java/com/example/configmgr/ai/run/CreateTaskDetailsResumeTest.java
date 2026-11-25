@@ -40,11 +40,14 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -67,7 +70,7 @@ class CreateTaskDetailsResumeTest {
     private static final String SYSTEM_TEXT = "PERSONA 行\n\n## 当前工作区状态\n<workspace_state>\n"
             + "页面：任务中心\n</workspace_state>\n";
 
-    private final InMemoryRunStore store = new InMemoryRunStore(true);
+    private final InMemoryRunStore store = spy(new InMemoryRunStore(true));
 
     private final ObjectMapper mapper = new ObjectMapper();
 
@@ -231,6 +234,86 @@ class CreateTaskDetailsResumeTest {
                 .isEqualTo(FormPurposes.CREATE_TASK_DETAILS);
         assertThat(waiting.getFirst().getCreateTaskToolCallId()).isEqualTo(ORIGINAL_CALL);
         assertThat(waiting.getFirst().getCreateTaskArguments()).contains("仍未知");
+    }
+
+    @Test
+    void storageFailureConvergesOriginalCreateWithoutUnusablePending() {
+        seedSubmitted(ENUM_ARGUMENTS, enumGap("usd"), "{\"enum_value_0_0\":\"USD\"}");
+        when(this.preflight.inspect(eq("create_task"), anyString(), any(AiContext.class)))
+                .thenReturn(passingReport());
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw new IllegalStateException("storage failed after pending write");
+        }).when(this.store).saveSuspended(eq(RUN_ID), any(), any(), anyList(), anyList(), eq(this.codec), any());
+
+        ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+        assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+        PendingToolCall create = this.store.pending(RUN_ID, ORIGINAL_CALL);
+        assertThat(create.getStatus()).isEqualTo(PendingToolCall.BLOCKED);
+        assertThat(create.getCode()).isEqualTo("HOST_FORM_PARK_FAILED");
+        assertThat(create.isExecuted()).isFalse();
+        assertThat(create.getCreatedTaskId()).isNull();
+        assertThat(create.getCreatedJobId()).isNull();
+        verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+        assertThat(this.store.ledger(RUN_ID)).isEmpty();
+    }
+
+    @Test
+    void requestPublicationFailureStaysParkedWithoutModelDrive() {
+        seedSubmitted(ENUM_ARGUMENTS, enumGap("usd"), "{\"enum_value_0_0\":\"USD\"}");
+        when(this.preflight.inspect(eq("create_task"), anyString(), any(AiContext.class)))
+                .thenReturn(passingReport());
+        doThrow(new IllegalStateException("request publication failed")).when(this.emitter)
+                .confirmRequest(any(PendingToolCall.class));
+
+        ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+        assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+        assertThat(result.body()).containsEntry("reason", "CREATE_TASK_CONFIRM_PARKED");
+        PendingToolCall create = this.store.pending(RUN_ID, ORIGINAL_CALL);
+        assertThat(create.getStatus()).isEqualTo(PendingToolCall.PENDING);
+        assertThat(create.isExecuted()).isFalse();
+        assertThat(this.store.get(RUN_ID).getInFlightToolCalls()).extracting(PendingToolCall::getToolCallId)
+                .containsExactly(ORIGINAL_CALL);
+        verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
+        assertThat(this.store.ledger(RUN_ID)).isEmpty();
+    }
+
+    @Test
+    void unchangedAmbiguousSubmissionGetsANewCorrectionForm() {
+        Resolution gap = new Resolution(Status.UNRESOLVED, FIELD_ARGUMENTS, List.of(
+                new UnresolvedReference(Kind.FIELD, 0, 0, "未知字段", List.of())),
+                CreateTaskReferenceResolver.UNRESOLVED_CODE);
+        seedSubmitted(FIELD_ARGUMENTS, gap, "{\"field_0_0\":\"仍未知\"}");
+
+        ResumeService.ResumeResult first = this.service.resume(RUN_ID);
+        PendingToolCall firstSuccessor = waitingDetailsForm();
+        GateCalls.submit(this.gate, RUN_ID, firstSuccessor.getToolCallId(), "{\"field_0_0\":\"仍未知\"}",
+                "unit-test");
+        ResumeService.ResumeResult second = this.service.resume(RUN_ID);
+        PendingToolCall secondSuccessor = waitingDetailsForm();
+        ResumeService.ResumeResult duplicate = this.service.resume(RUN_ID);
+
+        assertThat(first.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+        assertThat(second.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+        assertThat(secondSuccessor.getToolCallId()).isNotEqualTo(firstSuccessor.getToolCallId());
+        assertThat(this.store.pendingsLenient(RUN_ID)).hasSize(3);
+        assertThat(duplicate.outcome()).isEqualTo(ResumeService.Outcome.PENDING_UNRESOLVED);
+        verifyNoInteractions(this.preflight);
+        verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+        verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
+        assertThat(this.store.ledger(RUN_ID)).isEmpty();
+    }
+
+    private PendingToolCall waitingDetailsForm() {
+        List<PendingToolCall> waiting = this.store.pendingsLenient(RUN_ID).stream()
+                .filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))
+                .toList();
+        assertThat(waiting).hasSize(1);
+        assertThat(read(waiting.getFirst().getArguments()).path("form").path("purpose").asText())
+                .isEqualTo(FormPurposes.CREATE_TASK_DETAILS);
+        return waiting.getFirst();
     }
 
     private PendingToolCall seedSubmitted(String arguments, Resolution resolution, String result) {
