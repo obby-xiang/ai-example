@@ -103,14 +103,21 @@ public class CreateTaskReferenceResolver {
         if (conditions == null || conditions.isNull()) {
             return;
         }
+        if (!conditions.isObject()) {
+            throw new IllegalArgumentException("conditions must be an object");
+        }
         JsonNode fields = conditions.get("fields");
         if (fields == null || fields.isNull()) {
             return;
         }
-        if (!conditions.isObject() || !(fields instanceof ArrayNode fieldArray)) {
+        if (!(fields instanceof ArrayNode fieldArray)) {
             throw new IllegalArgumentException("conditions.fields must be an array");
         }
-        if (fieldArray.isEmpty() || definitions.size() != 1) {
+        if (fieldArray.isEmpty()) {
+            return;
+        }
+        if (definitions.size() != 1) {
+            addFieldsWithoutUniqueDefinition(fieldArray, unresolved);
             return;
         }
         SlotDefinition definition = definitions.getFirst();
@@ -119,6 +126,20 @@ public class CreateTaskReferenceResolver {
                 throw new IllegalArgumentException("conditions.fields entries must be objects");
             }
             resolveField(field, definition, index, unresolved);
+        }
+    }
+
+    private static void addFieldsWithoutUniqueDefinition(ArrayNode fields, List<UnresolvedReference> unresolved) {
+        for (int index = 0; index < fields.size(); index++) {
+            if (!(fields.get(index) instanceof ObjectNode field)) {
+                throw new IllegalArgumentException("conditions.fields entries must be objects");
+            }
+            JsonNode referenceNode = field.get("fieldCode");
+            if (referenceNode == null || !referenceNode.isNull() && !referenceNode.isTextual()) {
+                throw new IllegalArgumentException("fieldCode must be a string or null");
+            }
+            String reference = referenceNode.isNull() ? null : referenceNode.asText();
+            unresolved.add(new UnresolvedReference(Kind.FIELD, -1, index, reference, List.of()));
         }
     }
 

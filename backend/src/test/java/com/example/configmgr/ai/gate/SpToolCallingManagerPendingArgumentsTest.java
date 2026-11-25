@@ -186,6 +186,22 @@ class SpToolCallingManagerPendingArgumentsTest {
     }
 
     @Test
+    void missingResolverFailsClosedBeforePreflightOrHitl() {
+        when(this.preflightProbe.inspect(eq("create_task"), anyString(), any(AiContext.class)))
+                .thenReturn(failingReport());
+        String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{}}";
+        execute(original);
+
+        verify(this.preflightProbe, never()).inspect(anyString(), anyString(), any(AiContext.class));
+        verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+        PendingToolCall pending = capturedPending();
+        assertThat(pending.getCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
+        assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+        assertThat(pending.getArguments()).isEqualTo(original);
+        assertThat(pending.isExecuted()).isFalse();
+    }
+
+    @Test
     void exportNonEmptyConditionsPassUnchanged() {
         String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
         PendingToolCall pending = bind(original, "普通问答");

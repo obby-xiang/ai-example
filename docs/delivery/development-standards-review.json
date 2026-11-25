@@ -7706,6 +7706,62 @@
           "reason": "七个计划方法均有独立RED/GREEN证据，追加null空引用断言完成RED到GREEN；IDEA定向build无问题且Maven实际编译363个生产源成功；clean曾因既有jar被占用失败，随后compile重编成功；全量套件、真实模型、Redis Cluster和多实例NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:831ffcc03c0b397777baeebcc37e7f68b15936f0405512f820a773f7575339f9",
+      "status": "reviewed",
+      "reason": "对审查修复的两个生产文件全部暂存hunk逐一静态复核，确认非空字段不再因定义数为零或多于一个而绕过解析、缺失resolver不再fail-open、conditions先校验对象形状；未发现剩余问题。",
+      "reviewedAt": "2026-11-25T15:24:55+08:00",
+      "reviewer": "Kimi Code Task 1审查修复上下文静态逐hunk自审（按用户要求未派遣独立reviewer）",
+      "specChanges": [
+        {
+          "change": "非空conditions.fields只有在唯一所属定义明确时才可RESOLVED；缺少唯一所属定义时逐字段返回definitionIndex=-1的FIELD未决项，非对象conditions及缺失resolver均FAILED。",
+          "reason": "审查发现原实现会跳过零/多定义下的字段、在缺失resolver时继续预检，并在读取fields后才判断conditions形状。",
+          "impact": "未决字段保留原创建参数供后续收集，结构或装配失败在预检/HITL前阻断；唯一主键、多配置空条件和scopeKeys行为不变。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/CreateTaskReferenceResolver.java",
+          "status": "checked",
+          "reason": "把conditions对象校验前移，并为无唯一所属定义的字段生成完整定位未决列表；新增helper复用既有record且方法规模合规，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "合法类型create_task在resolver缺失时构造既有FAILED结果并复用零业务副作用阻断，非create及类型表单优先路径不变；已IDEA Reformat。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "仅复用既有Resolution、UnresolvedReference、FAILED_CODE和阻断方法，无新增依赖、工具或模型调用。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增helper使用显式大括号、非null不可变空options和明确-1未知定义下标；触及方法均低于50行/复杂度20，无新增import或集合泄漏。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "非对象conditions经既有WARN保留Throwable，缺失装配通过既有阻断WARN和稳定FAILED码可观测，不输出原始参数或异常给前端。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "未新增卡片或提示形态，只阻止未解析字段和失败装配误入原创建确认卡，既有用户路径保持不变。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "沿用现有pending终态及预检/HITL顺序，未新增Redis、数据库、并发或共享状态；缺失resolver不会写业务任务或作业。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "仍在完整JSON树上先验证对象再读取字段，不涉及用户文本、字节流、Unicode截断或SSE解析变化。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "三个审查回归方法分别取得预期RED并独立GREEN，另四个相邻方法逐个通过；最终IDEA定向build无问题、Maven compile成功且最终测试实际编译363个生产源；全量套件和真实模型NOT_RUN。"
+        }
+      }
     }
   ]
 }

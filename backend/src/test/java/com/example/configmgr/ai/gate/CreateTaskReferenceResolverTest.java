@@ -128,6 +128,56 @@ class CreateTaskReferenceResolverTest {
                 .isEqualTo(" REGION_A ");
     }
 
+    @Test
+    void nonEmptyFieldsRequireUniqueOwningDefinition() {
+        CreateTaskReferenceResolver resolver = resolver(() -> List.of(currency("CNY", "USD"),
+                new SlotDefinition("FX_RATE", "汇率", List.of())));
+        String withoutDefinition = "{\"type\":\"EXPORT\",\"defCodes\":[],\"conditions\":{\"fields\":[{\"fieldCode\":null,\"operator\":\"EQ\",\"value\":\"CNY\"},{\"fieldCode\":\"货币代码\",\"operator\":\"EQ\",\"value\":\"USD\"}]}}";
+
+        CreateTaskReferenceResolver.Resolution missingOwner = resolver.resolve(withoutDefinition);
+        assertThat(missingOwner.status()).isEqualTo(Status.UNRESOLVED);
+        assertThat(missingOwner.canonicalArguments()).isEqualTo(withoutDefinition);
+        assertThat(missingOwner.unresolved()).satisfiesExactly(first -> {
+            assertThat(first.kind()).isEqualTo(Kind.FIELD);
+            assertThat(first.definitionIndex()).isEqualTo(-1);
+            assertThat(first.fieldIndex()).isZero();
+            assertThat(first.reference()).isNull();
+        }, second -> {
+            assertThat(second.kind()).isEqualTo(Kind.FIELD);
+            assertThat(second.definitionIndex()).isEqualTo(-1);
+            assertThat(second.fieldIndex()).isEqualTo(1);
+            assertThat(second.reference()).isEqualTo("货币代码");
+        });
+
+        String multipleDefinitions = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\",\"FX_RATE\"],\"conditions\":{\"fields\":[{\"fieldCode\":\"货币代码\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
+        CreateTaskReferenceResolver.Resolution ambiguousOwner = resolver.resolve(multipleDefinitions);
+        assertThat(ambiguousOwner.status()).isEqualTo(Status.UNRESOLVED);
+        assertThat(ambiguousOwner.canonicalArguments()).isEqualTo(multipleDefinitions);
+        assertThat(ambiguousOwner.unresolved()).singleElement().satisfies(reference -> {
+            assertThat(reference.kind()).isEqualTo(Kind.FIELD);
+            assertThat(reference.definitionIndex()).isEqualTo(-1);
+            assertThat(reference.fieldIndex()).isZero();
+            assertThat(reference.reference()).isEqualTo("货币代码");
+        });
+    }
+
+    @Test
+    void nonObjectConditionsFailResolution() {
+        CreateTaskReferenceResolver resolver = resolver(List::of);
+        String array = "{\"type\":\"EXPORT\",\"defCodes\":[],\"conditions\":[]}";
+        String scalar = "{\"type\":\"EXPORT\",\"defCodes\":[],\"conditions\":\"invalid\"}";
+
+        CreateTaskReferenceResolver.Resolution arrayResult = resolver.resolve(array);
+        assertThat(arrayResult.status()).isEqualTo(Status.FAILED);
+        assertThat(arrayResult.failureCode()).isEqualTo("CREATE_TASK_REFERENCE_RESOLUTION_FAILED");
+        assertThat(arrayResult.canonicalArguments()).isEqualTo(array);
+
+        CreateTaskReferenceResolver.Resolution scalarResult = resolver.resolve(scalar);
+        assertThat(scalarResult.status()).isEqualTo(Status.FAILED);
+        assertThat(scalarResult.failureCode()).isEqualTo("CREATE_TASK_REFERENCE_RESOLUTION_FAILED");
+        assertThat(scalarResult.canonicalArguments()).isEqualTo(scalar);
+    }
+
     private CreateTaskReferenceResolver resolver(DefinitionCatalog catalog) {
         return new CreateTaskReferenceResolver(catalog, this.mapper);
     }

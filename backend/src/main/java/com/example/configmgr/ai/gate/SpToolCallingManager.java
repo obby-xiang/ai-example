@@ -951,8 +951,14 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private void resolveCreateTaskReferences(String runId, PendingToolCall pending) {
-        if (this.createTaskReferenceResolver == null || !TOOL_CREATE_TASK.equals(pending.getName())
+        if (!TOOL_CREATE_TASK.equals(pending.getName())
                 || com.example.configmgr.ai.form.TaskTypeForm.typeMissingOrInvalid(pending.getArguments())) {
+            return;
+        }
+        if (this.createTaskReferenceResolver == null) {
+            blockCreateTaskReferences(runId, pending, new CreateTaskReferenceResolver.Resolution(
+                    CreateTaskReferenceResolver.Status.FAILED, pending.getArguments(), List.of(),
+                    CreateTaskReferenceResolver.FAILED_CODE));
             return;
         }
         CreateTaskReferenceResolver.Resolution resolution = this.createTaskReferenceResolver.resolve(pending.getArguments());
