@@ -98,7 +98,11 @@ class GenerativeFormCreateEntryGuardTest {
 	private static void assertCreateTaskRequired(FrontendToolGuard.Verdict verdict) {
 		assertThat(verdict.accepted()).isFalse();
 		assertThat(verdict.code()).isEqualTo(ErrorCodes.FORM_SLOTS_ALREADY_KNOWN);
-		assertThat(verdict.render()).contains("create_task").contains("未向前端下发表单");
+		assertThat(verdict.render()).contains("create_task").contains("未向前端下发表单")
+				.contains("创建任务前不由模型表单收集配置项或筛选条件")
+				.contains("defCodes 必传，未提及时传 []，提及时传编码或名称")
+				.contains("字段未知时保留条件并传 fieldCode=null")
+				.doesNotContain("defCodes 未知时省略");
 	}
 
 }

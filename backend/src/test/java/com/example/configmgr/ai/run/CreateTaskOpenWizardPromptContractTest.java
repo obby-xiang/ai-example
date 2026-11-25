@@ -58,6 +58,6 @@ class CreateTaskOpenWizardPromptContractTest {
                 .contains("明确限定创建后停止时传 false")
                 .doesNotContain(CREATION_IS_NOT_CREATE_ONLY)
                 .doesNotContain(EXPLICIT_CREATE_ONLY);
-        assertThat(new YamlToolDefinitionSource().version()).isEqualTo("2026-10-27.41");
+        assertThat(new YamlToolDefinitionSource().version()).isEqualTo("2026-10-27.42");
     }
 }

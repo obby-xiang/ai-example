@@ -21,6 +21,8 @@ class PromptRulePacksTest {
         assertThat(rules).contains("用户明确新建时直接 create_task")
                 .contains("不先用列表摸底")
                 .contains("已知")
+                .contains("defCodes 必传；未提及时传 []，提及时传编码或名称")
+                .contains("字段未知时保留条件并传 fieldCode=null，由宿主在创建前解析或收集")
                 .doesNotContain("defCodes 与 conditions 独立判断")
                 .doesNotContain("单配置且条件已知")
                 .doesNotContain("多配置且条件已知")
@@ -61,6 +63,6 @@ class PromptRulePacksTest {
                     .contains("ALL 或 CUSTOM 留空均由宿主直接 confirm_step")
                     .doesNotContain("单个非必填自由文本框");
         }
-        assertThat(yamlSource.version()).isEqualTo("2026-10-27.41");
+        assertThat(yamlSource.version()).isEqualTo("2026-10-27.42");
     }
 }

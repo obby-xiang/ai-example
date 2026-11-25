@@ -227,12 +227,13 @@ public class GenerativeFormGuard implements FrontendToolGuard {
 			return null;
 		}
 		List<String> reasons = List.of(
-				"当前尚未绑定任务，配置项和筛选条件由创建后的任务向导收集，不是创建前的缺口",
+				"当前尚未绑定任务；先由 create_task 携带已明确的结构化引用，未决项由宿主在创建前收集，真正未提及的配置和条件再由任务向导收集",
 				"下一步：EXPORT 调用 create_task(type=EXPORT, conditions={})；IMPORT 调用 create_task(type=IMPORT)；"
-						+ "defCodes 未知时省略，不要再用表单或文字追问");
+						+ "defCodes 必传，未提及时传 []，提及时传编码或名称，不要再用表单或文字追问；"
+						+ "字段未知时保留条件并传 fieldCode=null");
 		return new Verdict(false, ErrorCodes.FORM_SLOTS_ALREADY_KNOWN,
-				"创建任务前不收集配置项或筛选条件，表单未下发（工具未执行、未向前端下发表单）", reasons,
-				List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN, "请先创建任务，再在任务向导中收集配置")), null);
+				"创建任务前不由模型表单收集配置项或筛选条件，表单未下发（工具未执行、未向前端下发表单）", reasons,
+				List.of(FormIssue.form(FormIssueCodes.FORM_SLOT_ALREADY_KNOWN, "请先调用 create_task；未决结构化引用由宿主在创建前收集")), null);
 	}
 
 	private static boolean isCreationCollection(String purpose, JsonNode form) {

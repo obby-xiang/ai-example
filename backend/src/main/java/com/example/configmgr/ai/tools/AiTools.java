@@ -447,7 +447,7 @@ public class AiTools {
             + "需要任务类型 type（EXPORT/IMPORT）、可选 title、必传 defCodes 数组（未提及配置时显式传 []）；EXPORT 还必须显式传 conditions：defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由；条件未决定时传 {}，不得省略。"
             + "单配置且条件已知时 defCodes=[该项] 并传非空 conditions；非空 conditions 只允许一个 defCode。多配置且条件已知时保留全部已知 defCodes，创建载荷 conditions={}，随后一次 set_conditions(items) 物化逐项条件；多配置不同或相同条件均走该分支。此时 {} 只表示创建载荷不承载逐项条件，不表示用户条件未知，更不是明确不设。"
             + "defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。用户提及配置时，defCodes 必须保留其编码或名称，由宿主唯一解析为权威编码；只有未提及时才传空数组，不得因不知道内部编码而省略。"
-            + "紧凑修饰也可构成条件，不要求出现“筛选”“条件”或等号关键词；只有能唯一确定所属配置、字段、算子和值/范围时才视为已知条件；字段编码未知时保留条件并传 fieldCode=null，由宿主唯一解析，不得丢弃条件或猜测。后续 select_definitions/set_conditions 只物化草案。条件已知（对话里已给）时由前端 set_conditions 形成草案，宿主不再弹条件表；条件未知时宿主提供 conditionMode=ALL/CUSTOM 表单。"
+            + "紧凑修饰也可构成条件，不要求出现“筛选”“条件”或等号关键词；能确定所属配置、算子和值/范围时即保留条件；字段未知时传 fieldCode=null，由宿主解析或在创建前收集，不得丢弃条件或猜测。已解析槽位直接用于创建，未决结构化引用由宿主在创建前集中收集；后续 select_definitions/set_conditions 只物化草案。条件已知（对话里已给）时由前端 set_conditions 形成草案，宿主不再弹条件表；条件未知时宿主提供 conditionMode=ALL/CUSTOM 表单。"
             + "ALL 或 CUSTOM 留空均由宿主直接 confirm_step，不调用模型或 set_conditions；CUSTOM 非空文本才由模型解析并通过一次 set_conditions(items) 形成草案。"
             + "条件表单由宿主统一发放，模型不得自行调用 SET_CONDITIONS 表单。"
             + "标题不追问，缺省按类型生成；类型无法判断时才用 TASK_TYPE 表单。旧任务状态不自动带入。前置：确认卡批准后才会创建；同一轮最多一次；创建不等于执行。"

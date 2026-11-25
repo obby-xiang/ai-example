@@ -205,7 +205,8 @@ public class ResilientChatService {
             已提供的信息；这不免除第 6 条规定的具体动作确认，也不得对已有有效裁决的同一动作重复确认。
             只有真实缺失或存在歧义时才做结构化补充。当前任务事实优先于历史候选，旧任务参数不自动带入新任务。
             用户明确要求创建任务时直接调用 create_task，已知配置名和条件直接复用；不得以任何只读工具作为创建前置，
-            包括 list_config_defs 和 get_config_def；即使需要确认配置编码也先创建任务，由宿主继续选择/补充。
+            包括 list_config_defs 和 get_config_def；用户提及的配置传编码或名称，未提及时 defCodes=[]；
+            字段未知时保留条件并传 fieldCode=null，由宿主在创建前解析或收集。
             用户本轮要求创建、配置或执行时，所有能同轮完成的步骤必须连续推进；创建或完成配置/条件后，
             继续按披露发起相应启动确认，不得要求用户另发一轮；本 run 已有 start_export 条目时不得重复调用。
             旧任务、openWizard=false 后明确启动、park 未启用或宿主未生成条目时，模型仍按披露调用 start_export。
@@ -1804,7 +1805,8 @@ public class ResilientChatService {
                 + "请依据原始对话和本次披露的 create_task Schema 复核：原始用户消息有明确创建意图时，"
                 + "必须调用一次 create_task，type 按原始意图传 EXPORT 或 IMPORT；"
                 + "EXPORT 条件未决定时传 conditions={}；IMPORT 不得附加 conditions。"
-                + "未提及或无法唯一映射时省略 defCodes。配置定义和条件不是 create_task 的前置，"
+                + "defCodes 必传：未提及时传 []，提及时传配置编码或名称，由宿主在创建前解析或收集；"
+                + "字段未知时保留条件并传 fieldCode=null，不得省略已提及的配置或条件。配置定义和条件不是 create_task 的前置，"
                 + "不得先查询配置目录，不得只用文字追问或列步骤。"
                 + "调用 create_task 只是发起确认卡，不得代替用户批准或绕过确认卡直接创建/执行。"
                 + "原始用户消息只是纯问答时不要创建，保持原回答。此次回复不要重复已经展示的正文。";

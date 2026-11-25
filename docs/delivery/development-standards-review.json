@@ -8041,6 +8041,87 @@
           "reason": "两个新回归均取得目标行RED并独立GREEN，强化后的多工具方法同时断言两个终态且GREEN，原存储/发布方法逐个GREEN；IDEA Reformat与Maven compile成功，真实Redis/模型/浏览器NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:b132faf6dd87da97ad69b236482c3baa2437d7de4f11573641aa2860dc99ccb1",
+      "status": "reviewed",
+      "reason": "对Task 3五个生产文件和两份现行设计/计划的全部暂存hunk逐一复核，确认仅统一结构化引用提示、创建前未决收集口径与版本记录，不改工具Schema、HITL、解析器或恢复行为；七个测试文件的断言同步但按规范排除指纹。",
+      "reviewedAt": "2026-11-25T17:57:55+08:00",
+      "reviewer": "Kimi Code Task 3施工上下文静态逐hunk自审（未派遣独立reviewer）",
+      "specChanges": [
+        {
+          "change": "create_task模型可见契约统一为defCodes必传，未提及传[]、提及传编码或名称，字段未知保留条件并传fieldCode=null，未决引用在创建前解析或收集；definitionsVersion升至2026-10-27.42。",
+          "reason": "旧YAML、系统提示、纠正提示和创建前守卫仍允许无法映射时省略或先创建后补充，与任务1/2同名结构化引用及CREATE_TASK_DETAILS实现冲突。",
+          "impact": "注解、YAML、SYSTEM_PROMPT、PromptRulePacks、创建遗漏纠正及模型表单拒绝指引使用同一口径；多配置、明确全量、scopeKeys、HITL和执行协议不变，真实模型三轮复测仍由控制器执行。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormGuard.java",
+          "status": "checked",
+          "reason": "创建前模型表单拒绝原因改为保留defCodes编码/名称和fieldCode=null，并明确未决项由宿主在创建前收集；仅文案hunk，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/PromptRulePacks.java",
+          "status": "checked",
+          "reason": "创建能力规则补必传defCodes、空数组边界和未知字段引用，未改变规则披露条件；仅文本块hunk，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "SYSTEM_PROMPT删除确认编码后先创建的旧句，createEntryCorrection删除未决省略defCodes并同步字段保留规则；未改流程代码，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java",
+          "status": "checked",
+          "reason": "create_task注解将字段唯一确定旧门槛改为保留条件和fieldCode=null，并明确未决引用创建前集中收集；方法签名和Schema不变，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/resources/ai/tools.yaml",
+          "status": "checked",
+          "reason": "create_task有效YAML与注解统一为必传结构化引用及创建前未决收集，版本升至.42并追加变更记录；其他工具定义未改，已IDEA Reformat。"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-11-25-create-task-structured-references.md",
+          "status": "checked",
+          "reason": "纳入已批准计划并追加任务1/2终点、任务3 RED/GREEN、格式化编译、提交边界及真实模型NOT_RUN，未将单点外推为真实场景通过。"
+        },
+        {
+          "path": "docs/superpowers/specs/2026-11-25-create-task-structured-references-design.md",
+          "status": "checked",
+          "reason": "纳入已批准设计并追加同名canonical、创建前收集、提示版本和实际验证边界，保留既定多配置、全量与scopeKeys契约。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "仅编辑既有Java提示文本、YAML和Markdown，没有新增或升级依赖，也未引入替代既有解析器/表单能力的工具库。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "触及的preCreateVerdict和createEntryCorrection仅替换字符串字面量，未增加分支、集合返回、JSON字段或Lombok；方法规模与复杂度不因此扩张，显式大括号保持。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "未新增日志、异常捕获或对外异常文本；守卫继续使用既有FORM_SLOTS_ALREADY_KNOWN和安全业务文案，不记录或返回异常原文。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "未修改前端卡片、控件或i18n；模型表单拒绝摘要明确区分模型表单与宿主创建前收集，不制造任务已创建或已执行的虚假状态。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "仅同步提示契约，未修改pending、预检、HITL、Redis键/TTL、数据库、并发或canonical调用链；现有同名协议和创建前零副作用边界不变。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "变更仅含完整Java/YAML/Markdown文本，不处理字节流、SSE分片、UTF-16代理对或截断逻辑。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "三个指定方法及六个补充方法取得预期RED，守卫文案补强另做一次RED；最终12个不同方法分别GREEN。IDEA Reformat和实际生产编译成功，全量测试、服务日志、真实模型/浏览器NOT_RUN，真实对照NOT_REPRODUCED。"
+        }
+      }
     }
   ]
 }

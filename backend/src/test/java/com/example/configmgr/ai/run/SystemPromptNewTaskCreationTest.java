@@ -17,7 +17,10 @@ class SystemPromptNewTaskCreationTest {
                 .contains("已知配置名和条件直接复用")
                 .contains("不得以任何只读工具作为创建前置")
                 .contains("list_config_defs")
-                .contains("get_config_def");
+                .contains("get_config_def")
+                .contains("用户提及的配置传编码或名称，未提及时 defCodes=[]")
+                .contains("字段未知时保留条件并传 fieldCode=null，由宿主在创建前解析或收集")
+                .doesNotContain("即使需要确认配置编码也先创建任务，由宿主继续选择/补充");
     }
 
     @Test

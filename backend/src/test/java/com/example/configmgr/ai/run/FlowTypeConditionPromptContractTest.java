@@ -20,12 +20,13 @@ class FlowTypeConditionPromptContractTest {
     private static final String INDEPENDENT_SLOTS =
             "defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由";
     private static final String UNIQUE_MAPPING =
-            "用户提及的配置编码、名称或别名能唯一映射到配置定义时必须传入对应 defCode；只有未提及或无法唯一映射时才省略";
+            "用户提及配置时，defCodes 必须保留其编码或名称，由宿主唯一解析为权威编码；只有未提及时才传空数组，不得因不知道内部编码而省略";
     private static final String COMPACT_CONDITION = "紧凑修饰也可构成条件，不要求出现“筛选”“条件”或等号关键词";
-    private static final String COMPACT_CONDITION_BOUNDARY =
-            "只有能唯一确定所属配置、字段、算子和值/范围时才视为已知条件；无法唯一确定仍按未决定，不得猜测";
+    private static final String COMPACT_CONDITION_BOUNDARY = "能确定所属配置、算子和值/范围时即保留条件";
+    private static final String UNKNOWN_FIELD_REFERENCE =
+            "字段未知时传 fieldCode=null，由宿主解析或在创建前收集，不得丢弃条件或猜测";
     private static final String MATERIALIZE_KNOWN_SLOTS =
-            "已知槽位不得推迟到后续表单，后续 select_definitions/set_conditions 只物化草案";
+            "已解析槽位直接用于创建，未决结构化引用由宿主在创建前集中收集；后续 select_definitions/set_conditions 只物化草案";
     private static final String SINGLE_CONDITIONED_DEFINITION = "非空 conditions 只允许一个 defCode";
     private static final String SINGLE_CONFIG_KNOWN_CONDITION =
             "单配置且条件已知时 defCodes=[该项] 并传非空 conditions";
@@ -98,8 +99,12 @@ class FlowTypeConditionPromptContractTest {
     void createSlotRulesStaySynchronizedAcrossYamlAndAnnotation() throws NoSuchMethodException {
         for (String description : createTaskDescriptions()) {
             assertThat(description).contains(INDEPENDENT_SLOTS, UNIQUE_MAPPING, COMPACT_CONDITION,
-                    MATERIALIZE_KNOWN_SLOTS, SINGLE_CONDITIONED_DEFINITION)
-                    .contains("无法唯一映射时保留宿主配置选择卡");
+                    UNKNOWN_FIELD_REFERENCE, MATERIALIZE_KNOWN_SLOTS, SINGLE_CONDITIONED_DEFINITION)
+                    .contains("必传 defCodes 数组（未提及配置时显式传 []）")
+                    .doesNotContain("只有未提及或无法唯一映射时才省略")
+                    .doesNotContain("即使需要确认配置编码也先创建")
+                    .doesNotContain("无法唯一映射时保留宿主配置选择卡")
+                    .doesNotContain("已知槽位不得推迟到后续表单");
         }
     }
 
@@ -131,7 +136,7 @@ class FlowTypeConditionPromptContractTest {
 
     @Test
     void toolsVersionIsBumpedForTheNewDescriptions() {
-        assertThat(new YamlToolDefinitionSource().version()).isEqualTo("2026-10-27.41");
+        assertThat(new YamlToolDefinitionSource().version()).isEqualTo("2026-10-27.42");
     }
 
     private static List<String> createTaskDescriptions() throws NoSuchMethodException {
