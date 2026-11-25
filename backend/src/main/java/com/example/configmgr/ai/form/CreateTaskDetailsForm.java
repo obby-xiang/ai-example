@@ -149,10 +149,10 @@ public class CreateTaskDetailsForm extends HostForm {
     }
 
     public boolean parkCreateTaskConfirmation(String runId, PendingToolCall createTask, List<Message> history) {
-        RunSnapshot snapshot = this.store.get(runId);
-        String content = snapshot == null ? null : snapshot.getAssistantContent();
-        Map<String, Object> metadata = snapshot == null ? null : snapshot.getAssistantMetadata();
         try {
+            RunSnapshot snapshot = this.store.get(runId);
+            String content = snapshot == null ? null : snapshot.getAssistantContent();
+            Map<String, Object> metadata = snapshot == null ? null : snapshot.getAssistantMetadata();
             this.store.saveSuspended(runId, content, this.registry.of(runId).transcriptFullText(), List.of(createTask),
                     history, this.codec, metadata);
         }

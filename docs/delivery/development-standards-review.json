@@ -7980,6 +7980,67 @@
           "reason": "五个新增回归分别取得预期RED并独立GREEN，原六个受影响方法也逐个GREEN；IDEA Reformat、Maven compile及npm run build成功，前端保留既有混合导入警告，真实Redis/多实例/模型/浏览器NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:52c2a8a19a16e7edf04d0f976c3d0e4a59f4af84f16f9389f4faf09028f105d5",
+      "status": "reviewed",
+      "reason": "对Task 2 fix round 2的两个生产文件全部暂存hunk逐一复核，确认初始快照读取纳入既有收敛，缺失详情表单bean在预检前形成真实失败终态；多工具测试已改为同时断言两个创建条目。",
+      "reviewedAt": "2026-11-25T17:24:59+08:00",
+      "reviewer": "Kimi Code Task 2 fix round 2施工上下文静态逐hunk自审（未派遣独立reviewer）",
+      "specChanges": [
+        {
+          "change": "确认挂起的初始store.get与saveSuspended处于同一异常保护边界，任一RuntimeException均复用HostForm收敛。",
+          "reason": "审查发现快照首读在try之外，存储读故障会绕过既有BLOCKED/HOST_FORM_PARK_FAILED收敛。",
+          "impact": "首读失败不再逃出或留下可用HITL，原创建明确未执行且无任务/作业；正常快照和帧序不变。"
+        },
+        {
+          "change": "恢复已解析详情回执时，createTaskDetailsForm缺失会在scope和预检前以PRECHECK_FAILED/CREATE_TASK_REFERENCE_RESOLUTION_FAILED失败关闭。",
+          "reason": "可选bean的直接调用会产生NPE，且若先预检会违反缺失恢复设施时的零预检要求。",
+          "impact": "缺装配可观测、未执行、无确认卡/任务/作业；已终态原调用仍按既有幂等重放，不受该守卫影响。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/CreateTaskDetailsForm.java",
+          "status": "checked",
+          "reason": "仅把store.get及正文/metadata派生移入既有try，catch继续调用convergeAfterParkFailure并返回false；已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "在原创建已终态重放之后、scope/预检之前检查可选详情表单bean，缺失时复用既有FAILED阻断与SETTLED重建；已IDEA Reformat。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "仅移动既有读取并复用Resolution、FAILED_CODE和阻断方法，无新增依赖、模型调用或用户文本解析。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "触及方法保持显式大括号、非null空列表和既有返回契约，方法行数与复杂度未越界；未改变JSON字段或集合所有权。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "首读异常由HostForm WARN保留Throwable并只记录runId/toolCallId；缺bean经既有WARN和稳定FAILED码可观测，不外泄异常原文。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "未修改前端或用户文案，失败不会生成误导性的确认卡、任务或作业状态，既有通用表单交互不变。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "首读与部分写均进入同一失败收敛，缺bean在预检/HITL前形成真实终态；未新增Redis键、TTL、共享状态或数据库访问。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "仅调整Java异常边界和装配守卫，不处理文本、字节流、SSE分片或Unicode截断。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "两个新回归均取得目标行RED并独立GREEN，强化后的多工具方法同时断言两个终态且GREEN，原存储/发布方法逐个GREEN；IDEA Reformat与Maven compile成功，真实Redis/模型/浏览器NOT_RUN。"
+        }
+      }
     }
   ]
 }

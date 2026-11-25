@@ -96,6 +96,8 @@ class CreateTaskDetailsResumeTest {
 
     private CreateTaskDetailsForm detailsForm;
 
+    private SpToolCallingManager manager;
+
     private ResumeService service;
 
     private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
@@ -123,12 +125,12 @@ class CreateTaskDetailsResumeTest {
         this.gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations,
                 mock(ToolActivityBeacon.class), List.of(new GenerativeFormGuard(this.mapper)));
         this.detailsForm = new CreateTaskDetailsForm(this.store, this.registry, this.gate, this.codec, this.properties);
-        SpToolCallingManager manager = new SpToolCallingManager(this.store, this.registry, this.gate,
+        this.manager = new SpToolCallingManager(this.store, this.registry, this.gate,
                 this.toolRegistry, this.codec, mock(ToolActivityBeacon.class), this.cancellations,
                 new ToolResultLimiter(this.properties), List.of(), this.preflight);
-        manager.setCreateTaskReferenceResolver(new CreateTaskReferenceResolver(this::catalog, this.mapper));
-        manager.setCreateTaskDetailsForm(this.detailsForm);
-        this.service = new ResumeService(this.store, this.registry, this.codec, this.chatService, manager,
+        this.manager.setCreateTaskReferenceResolver(new CreateTaskReferenceResolver(this::catalog, this.mapper));
+        this.manager.setCreateTaskDetailsForm(this.detailsForm);
+        this.service = new ResumeService(this.store, this.registry, this.codec, this.chatService, this.manager,
                 this.executor, mock(StringRedisTemplate.class), this.properties, this.cancellations,
                 new ToolResultLimiter(this.properties));
         this.service.setCreateTaskDetailsForm(this.detailsForm);
@@ -234,6 +236,53 @@ class CreateTaskDetailsResumeTest {
                 .isEqualTo(FormPurposes.CREATE_TASK_DETAILS);
         assertThat(waiting.getFirst().getCreateTaskToolCallId()).isEqualTo(ORIGINAL_CALL);
         assertThat(waiting.getFirst().getCreateTaskArguments()).contains("仍未知");
+    }
+
+    @Test
+    void initialStorageReadFailureConvergesOriginalCreateWithoutHitl() {
+        seedParked(ENUM_ARGUMENTS, enumGap("usd"));
+        List<Message> history = this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson());
+        PendingToolCall create = new PendingToolCall();
+        create.setToolCallId(ORIGINAL_CALL);
+        create.setName("create_task");
+        create.setType("function");
+        create.setArguments(ENUM_ARGUMENTS);
+        create.setKind(PendingToolCall.KIND_CONFIRM);
+        doThrow(new IllegalStateException("initial storage read failed")).when(this.store).get(RUN_ID);
+
+        boolean parked = this.detailsForm.parkCreateTaskConfirmation(RUN_ID, create, history);
+
+        assertThat(parked).isFalse();
+        PendingToolCall converged = this.store.pending(RUN_ID, ORIGINAL_CALL);
+        assertThat(converged.getStatus()).isEqualTo(PendingToolCall.BLOCKED);
+        assertThat(converged.getCode()).isEqualTo("HOST_FORM_PARK_FAILED");
+        assertThat(converged.isExecuted()).isFalse();
+        assertThat(converged.getCreatedTaskId()).isNull();
+        assertThat(converged.getCreatedJobId()).isNull();
+        verifyNoInteractions(this.preflight);
+        verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+        assertThat(this.store.ledger(RUN_ID)).isEmpty();
+    }
+
+    @Test
+    void missingDetailsFormBeanFailsClosedBeforePreflightOrHitl() {
+        seedSubmitted(ENUM_ARGUMENTS, enumGap("usd"), "{\"enum_value_0_0\":\"USD\"}");
+        when(this.preflight.inspect(eq("create_task"), anyString(), any(AiContext.class)))
+                .thenReturn(passingReport());
+        this.manager.setCreateTaskDetailsForm(null);
+
+        ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+        assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+        PendingToolCall create = this.store.pending(RUN_ID, ORIGINAL_CALL);
+        assertThat(create.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+        assertThat(create.getCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
+        assertThat(create.isExecuted()).isFalse();
+        assertThat(create.getCreatedTaskId()).isNull();
+        assertThat(create.getCreatedJobId()).isNull();
+        verifyNoInteractions(this.preflight);
+        verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+        assertThat(this.store.ledger(RUN_ID)).isEmpty();
     }
 
     @Test

@@ -188,12 +188,17 @@ class SpToolCallingManagerPendingArgumentsTest {
         verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
         ArgumentCaptor<PendingToolCall> captor = ArgumentCaptor.forClass(PendingToolCall.class);
         verify(this.store, atLeastOnce()).putPending(eq("run-pending-arguments"), captor.capture());
-        PendingToolCall pending = captor.getAllValues().stream()
-                .filter(entry -> "call-create".equals(entry.getToolCallId())).findFirst().orElseThrow();
-        assertThat(pending.getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
-        assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
-        assertThat(pending.getArguments()).isEqualTo(original);
-        assertThat(pending.isExecuted()).isFalse();
+        assertThat(captor.getAllValues()).filteredOn(entry -> "create_task".equals(entry.getName()))
+                .hasSize(2)
+                .extracting(PendingToolCall::getToolCallId)
+                .containsExactly("call-create", "call-create-2");
+        assertThat(captor.getAllValues()).filteredOn(entry -> "create_task".equals(entry.getName()))
+                .allSatisfy(entry -> {
+                    assertThat(entry.getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
+                    assertThat(entry.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+                    assertThat(entry.getArguments()).isEqualTo(original);
+                    assertThat(entry.isExecuted()).isFalse();
+                });
     }
 
     @Test

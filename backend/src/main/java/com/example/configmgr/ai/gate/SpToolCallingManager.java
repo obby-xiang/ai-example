@@ -3903,6 +3903,13 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (createTask.resolved() && !PendingToolCall.PENDING.equals(createTask.getStatus())) {
             return settledCreateTask(merged, resolution, createTask);
         }
+        if (this.createTaskDetailsForm == null) {
+            CreateTaskReferenceResolver.Resolution unavailable = new CreateTaskReferenceResolver.Resolution(
+                    CreateTaskReferenceResolver.Status.FAILED, createTask.getArguments(), List.of(),
+                    CreateTaskReferenceResolver.FAILED_CODE);
+            blockCreateTaskReferences(runId, createTask, unavailable);
+            return settledCreateTask(merged, unavailable, createTask);
+        }
         if (!this.toolRegistry.isContextMatched(createTask.getName(), context)) {
             blockOutOfScope(runId, context, createTask);
             return settledCreateTask(merged, resolution, createTask);
