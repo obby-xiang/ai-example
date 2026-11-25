@@ -3918,7 +3918,8 @@ function cardStatusTestId(part: ToolPart): string {
 const FORM_PURPOSE_TITLE_KEYS = {
   SELECT_DEFINITIONS: 'ai.gf.purpose.selectDefinitions',
   SET_CONDITIONS: 'ai.gf.purpose.setConditions',
-  TASK_TYPE: 'ai.gf.purpose.taskType'
+  TASK_TYPE: 'ai.gf.purpose.taskType',
+  CREATE_TASK_DETAILS: 'ai.gf.purpose.createTaskDetails'
 } as const
 
 type SpecificFormPurpose = keyof typeof FORM_PURPOSE_TITLE_KEYS

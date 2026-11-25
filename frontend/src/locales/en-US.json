@@ -397,7 +397,8 @@
       "purpose": {
         "selectDefinitions": "Select configuration items",
         "setConditions": "Set filter conditions",
-        "taskType": "Select task type"
+        "taskType": "Select task type",
+        "createTaskDetails": "Complete task details"
       },
       "selectPlaceholder": "Select {label}",
       "multiSelect": {

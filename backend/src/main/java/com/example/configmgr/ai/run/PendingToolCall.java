@@ -162,6 +162,12 @@ public class PendingToolCall {
     @JsonProperty("arguments")
     private String arguments;
 
+    @JsonProperty("createTaskToolCallId")
+    private String createTaskToolCallId;
+
+    @JsonProperty("createTaskArguments")
+    private String createTaskArguments;
+
     @JsonProperty("draftRunId")
     private String draftRunId;
 
@@ -441,6 +447,10 @@ public class PendingToolCall {
         out.put("type", this.type);
         out.put("kind", this.kind);
         out.put("arguments", this.arguments);
+        if (this.createTaskToolCallId != null) {
+            out.put("createTaskToolCallId", this.createTaskToolCallId);
+            out.put("createTaskArguments", this.createTaskArguments);
+        }
         out.put("status", this.status);
         out.put("transcriptSegmentRequired", this.transcriptSegmentRequired);
         out.put("outcome", effectiveOutcome().wire());

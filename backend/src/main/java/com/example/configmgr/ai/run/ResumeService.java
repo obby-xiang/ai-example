@@ -311,6 +311,13 @@ public class ResumeService {
     @Autowired(required = false)
     private com.example.configmgr.ai.form.ExportStartForm exportStartForm;
 
+    private com.example.configmgr.ai.form.CreateTaskDetailsForm createTaskDetailsForm;
+
+    @Autowired(required = false)
+    public void setCreateTaskDetailsForm(com.example.configmgr.ai.form.CreateTaskDetailsForm form) {
+        this.createTaskDetailsForm = form;
+    }
+
     /**
      * 进程内续跑互斥（同进程并发续跑的唯一闸；租约管的是跨实例）。
      *
@@ -1480,7 +1487,50 @@ public class ResumeService {
         state.settledInBatch = new ArrayList<>(state.snapshot.getInFlightToolCalls().size());
     }
 
+    private ResumeResult resumeCreateTaskDetails(ResumeState state) {
+        if (state.snapshot.getInFlightToolCalls().size() != 1
+                || !com.example.configmgr.ai.form.CreateTaskDetailsForm.isCreateTaskDetails(
+                        state.snapshot.getInFlightToolCalls().getFirst())) {
+            return null;
+        }
+        PendingToolCall item = state.snapshot.getInFlightToolCalls().getFirst();
+        PendingToolCall fresh = this.store.pending(state.runId, item.getToolCallId());
+        PendingToolCall effective = ObjectUtils.defaultIfNull(fresh, item);
+        SpToolCallingManager.CreateTaskDetailsResume result = this.toolCallingManager.resumeCreateTaskDetails(
+                state.runId, state.nextHopContext, state.history, effective);
+        if (result.status() == SpToolCallingManager.CreateTaskDetailsResumeStatus.NOT_APPLICABLE) {
+            return null;
+        }
+        if (result.status() == SpToolCallingManager.CreateTaskDetailsResumeStatus.SETTLED) {
+            state.snapshot.setInFlightToolCalls(List.of(result.createTask()));
+            return null;
+        }
+        state.body.put("resumed", false);
+        if (result.status() == SpToolCallingManager.CreateTaskDetailsResumeStatus.PARKED) {
+            state.body.put("reason", "CREATE_TASK_CONFIRM_PARKED");
+            return new ResumeResult(Outcome.ACCEPTED, state.body);
+        }
+        return parkNextCreateTaskDetails(state, result);
+    }
+
+    private ResumeResult parkNextCreateTaskDetails(ResumeState state,
+            SpToolCallingManager.CreateTaskDetailsResume result) {
+        String originalCall = state.snapshot.getInFlightToolCalls().getFirst().getCreateTaskToolCallId();
+        if (this.createTaskDetailsForm != null && this.createTaskDetailsForm.parkNextUnresolved(state.runId,
+                originalCall, result.mergedArguments(), result.resolution(), state.history)) {
+            state.body.put("reason", "CREATE_TASK_DETAILS_PARKED");
+            return new ResumeResult(Outcome.ACCEPTED, state.body);
+        }
+        state.body.put("reason", "CREATE_TASK_DETAILS_PARK_FAILED");
+        log.warn("create task details remain unresolved but the next form could not be parked runId={}", state.runId);
+        return new ResumeResult(Outcome.STATE_UNKNOWN, state.body);
+    }
+
     private ResumeResult rebuildResumeTools(ResumeState state) {
+        ResumeResult createTaskDetails = resumeCreateTaskDetails(state);
+        if (createTaskDetails != null) {
+            return createTaskDetails;
+        }
         if (state.snapshot.getInFlightToolCalls().isEmpty()) {
             return rebuildWithoutTools(state);
         }

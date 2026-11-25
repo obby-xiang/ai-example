@@ -7818,6 +7818,97 @@
           "reason": "resolver、工具契约、manager缺失和manager null四个方法均有预期RED→GREEN；显式空数组路径及九个受影响既有方法逐个GREEN；最终IDEA build无问题、Maven compile成功且契约测试实际编译363个生产源；全量套件和真实模型NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:a364bd5eda8316f3a188ac95ed2cdaca28200412ec9d13a6ed1b7477c1a7a132",
+      "status": "reviewed",
+      "reason": "对八个纳管生产文件的全部暂存hunk逐一静态复核，覆盖未决项完整收集、原创建身份持久化、回灌合并与重解析、预检/HITL顺序、取消与重复恢复、通用前端渲染；未发现剩余分级问题。",
+      "reviewedAt": "2026-11-25T16:33:52+08:00",
+      "reviewer": "Kimi Code Task 2施工上下文静态逐hunk自审（按用户要求未派遣独立reviewer）",
+      "specChanges": [
+        {
+          "change": "新增purpose=CREATE_TASK_DETAILS的宿主表单，只收集结构化未决引用，并在表单pending中显式持久化原create_task调用ID与原参数。",
+          "reason": "把Task 1的UNRESOLVED中间阻断替换为创建前人工补齐，同时保持canonical解析契约、零业务副作用和跨实例恢复能力。",
+          "impact": "仅单条合法类型create_task在预检前进入该表单；定义和字段使用文本输入，枚举使用权威options，超出既有表单上限时整卡安全失败。"
+        },
+        {
+          "change": "CREATE_TASK_DETAILS真实提交回执按kind/definitionIndex/fieldIndex合并原参数并重解析，唯一解析后恢复原调用进入既有预检和创建HITL，仍未决则确定性挂起下一张详情卡。",
+          "reason": "恢复必须保持原工具调用身份且不依赖模型重新发起create_task；取消、重复和迟到回执继续服从既有终态与未决准入口径。",
+          "impact": "resolved/unresolved路径不调用模型；取消沿用既有前端取消终态回灌；PendingToolCall新增可选JSON字段，其他pending及SSE字段保持兼容。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/CreateTaskDetailsForm.java",
+          "status": "checked",
+          "reason": "新增全有或全无的详情schema、稳定字段键和确定性后续卡ID，复用HostForm白名单/挂起/取消协议；合并只读结构化JSON并校验坐标，方法规模合规，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/FormPurposes.java",
+          "status": "checked",
+          "reason": "唯一用途注册表新增CREATE_TASK_DETAILS并保持原缺省用途与其他用途顺序语义，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "首轮UNRESOLVED转入详情表单，恢复侧复用既有resolver、scope、单轮创建上限、预检与确认帧；不伪造assistant或新模型调用，触及方法均低于50行/复杂度20，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/PendingToolCall.java",
+          "status": "checked",
+          "reason": "新增显式@JsonProperty的原创建ID/参数可选字段并纳入asMap，toString白名单不输出参数正文，跨实例JSON往返可读，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java",
+          "status": "checked",
+          "reason": "只识别单个CREATE_TASK_DETAILS in-flight真实回执并读取最新pending；resolved确认挂起、settled进入原工具重建、未决重挂详情卡，取消保持通用终态路径，已IDEA Reformat。"
+        },
+        {
+          "path": "frontend/src/components/AiPanel/AiPanel.vue",
+          "status": "checked",
+          "reason": "仅在既有FORM_PURPOSE_TITLE_KEYS注册新用途，字段和提交仍由通用FormRenderer处理，无业务专属控件或新渲染分支，已IDEA Reformat。"
+        },
+        {
+          "path": "frontend/src/locales/en-US.json",
+          "status": "checked",
+          "reason": "新增通用英文卡头Complete task details，与后端TITLE_EN一致，未加入技术标识或硬编码业务字段，已IDEA Reformat。"
+        },
+        {
+          "path": "frontend/src/locales/zh-CN.json",
+          "status": "checked",
+          "reason": "新增通用中文卡头补充创建信息，与既有purpose标题映射同源，无技术话术或新增模板结构，已IDEA Reformat。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用既有HostForm、Jackson、Apache StringUtils、JDK UUID、ConfirmGate与FormRenderer，无新增或升级依赖，无用户原文解析和模型调用。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增JSON字段显式命名，集合返回和输入副本边界明确，控制分支有大括号，List首尾使用getFirst，无静态import；新增及触及方法均满足50行与复杂度20门槛。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "合并与挂起失败以WARN保留Throwable并只记录runId/toolCallId/数量，不把异常原文或原始参数返回前端；预检失败复用既有安全业务码。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "中英文标题均通过既有i18n和通用表单渲染，未新增专用卡片、滚动区或控件；用户只在确有未决引用或创建确认时看到人工决策卡。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "复用pending/park/req/终态与续跑租约，原创建ID跨实例可恢复；重复恢复由PENDING_UNRESOLVED幂等挡住，未新增Redis键、TTL、数据库访问或业务写入。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "只解析完整表单arguments/result JSON，稳定键保留原始Unicode值；不处理用户正文、SSE分片、字节解码或截断。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "六个指定方法均先取得缺CreateTaskDetailsForm的预期RED并逐个GREEN；最终IDEA Reformat成功、Maven compile成功、npm run build成功；前端仅有既有stores/ai.ts混合导入警告，全量套件、真实Redis/Cluster、多实例、真实模型与浏览器NOT_RUN。"
+        }
+      }
     }
   ]
 }

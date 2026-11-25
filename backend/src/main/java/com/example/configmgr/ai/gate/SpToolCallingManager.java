@@ -464,6 +464,13 @@ public class SpToolCallingManager implements ToolCallingManager {
         this.createTaskReferenceResolver = resolver;
     }
 
+    private com.example.configmgr.ai.form.CreateTaskDetailsForm createTaskDetailsForm;
+
+    @Autowired(required = false)
+    public void setCreateTaskDetailsForm(com.example.configmgr.ai.form.CreateTaskDetailsForm form) {
+        this.createTaskDetailsForm = form;
+    }
+
     public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
                                 MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
                                 ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
@@ -966,6 +973,9 @@ public class SpToolCallingManager implements ToolCallingManager {
             pending.setArguments(resolution.canonicalArguments());
             return;
         }
+        if (resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED) {
+            return;
+        }
         blockCreateTaskReferences(runId, pending, resolution);
     }
 
@@ -981,12 +991,38 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private void preparePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
+        parkCreateTaskDetailsIfDue(state, pending, batchSize);
         parkTaskTypeIfDue(state, pending, batchSize);
         if (isConditionRejected(state, pending, batchSize) || isPreflightBlocked(state, pending)
                 || isCreateTaskBlocked(state, pending) || isFrontendSkipped(state, pending)) {
             return;
         }
         state.suspended.add(pending);
+    }
+
+    private void parkCreateTaskDetailsIfDue(ToolBatchState state, PendingToolCall pending, int batchSize) {
+        if (state.budgetArmed || this.createTaskReferenceResolver == null || batchSize != 1
+                || !TOOL_CREATE_TASK.equals(pending.getName()) || !PendingToolCall.KIND_CONFIRM.equals(pending.getKind())
+                || com.example.configmgr.ai.form.TaskTypeForm.typeMissingOrInvalid(pending.getArguments())) {
+            return;
+        }
+        CreateTaskReferenceResolver.Resolution resolution = this.createTaskReferenceResolver.resolve(pending.getArguments());
+        if (resolution.status() != CreateTaskReferenceResolver.Status.UNRESOLVED) {
+            return;
+        }
+        if (this.createTaskDetailsForm != null) {
+            List<Message> detailsHistory = new ArrayList<>(state.prompt.getInstructions());
+            String assistantBody = StringUtils.defaultString(state.assistant.getText());
+            if (this.createTaskDetailsForm.parkIfUnresolved(state.runId, pending.getToolCallId(), pending.getArguments(),
+                    resolution, detailsHistory, assistantBody, state.assistant.getMetadata())) {
+                commitTurnText(state.prompt);
+                recordParkedHostFormTranscript(state.runId, state.prompt, state.assistant);
+                throw new RunParkedException(state.runId,
+                        com.example.configmgr.ai.form.CreateTaskDetailsForm.toolCallId(pending.getToolCallId()),
+                        PendingToolCall.KIND_FRONTEND);
+            }
+        }
+        blockCreateTaskReferences(state.runId, pending, resolution);
     }
 
     private void parkTaskTypeIfDue(ToolBatchState state, PendingToolCall pending, int batchSize) {
@@ -3788,6 +3824,126 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     // ── 辅助 ────────────────────────────────────────────────────────────────
+
+    public enum CreateTaskDetailsResumeStatus {
+        NOT_APPLICABLE, PARKED, UNRESOLVED, SETTLED
+    }
+
+    public record CreateTaskDetailsResume(CreateTaskDetailsResumeStatus status, String mergedArguments,
+                                           CreateTaskReferenceResolver.Resolution resolution, PendingToolCall createTask) {
+        private static CreateTaskDetailsResume notApplicable() {
+            return new CreateTaskDetailsResume(CreateTaskDetailsResumeStatus.NOT_APPLICABLE, null, null, null);
+        }
+    }
+
+    public CreateTaskDetailsResume resumeCreateTaskDetails(String runId, AiContext context, List<Message> history,
+                                                           PendingToolCall form) {
+        if (!com.example.configmgr.ai.form.CreateTaskDetailsForm.isCreateTaskDetails(form)
+                || !PendingToolCall.FRONTEND_RESULT.equals(form.getStatus())) {
+            return CreateTaskDetailsResume.notApplicable();
+        }
+        String merged = mergeCreateTaskDetails(form);
+        CreateTaskReferenceResolver.Resolution resolution = merged == null || this.createTaskReferenceResolver == null
+                ? new CreateTaskReferenceResolver.Resolution(CreateTaskReferenceResolver.Status.FAILED, merged, List.of(),
+                        CreateTaskReferenceResolver.FAILED_CODE)
+                : this.createTaskReferenceResolver.resolve(merged);
+        if (resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED) {
+            return new CreateTaskDetailsResume(CreateTaskDetailsResumeStatus.UNRESOLVED, merged, resolution, null);
+        }
+        PendingToolCall createTask = originalCreateTask(runId, form, resolution.canonicalArguments());
+        if (resolution.status() == CreateTaskReferenceResolver.Status.FAILED) {
+            blockCreateTaskReferences(runId, createTask, resolution);
+            return settledCreateTask(merged, resolution, createTask);
+        }
+        return resumeResolvedCreateTask(runId, context, history, merged, resolution, createTask);
+    }
+
+    private String mergeCreateTaskDetails(PendingToolCall form) {
+        try {
+            return com.example.configmgr.ai.form.CreateTaskDetailsForm.mergeSubmission(form);
+        }
+        catch (IllegalArgumentException ex) {
+            log.warn("create task details receipt could not be merged; failing closed toolCallId={}", form.getToolCallId(), ex);
+            return null;
+        }
+    }
+
+    private PendingToolCall originalCreateTask(String runId, PendingToolCall form, String canonicalArguments) {
+        PendingToolCall existing = this.store.pending(runId, form.getCreateTaskToolCallId());
+        if (existing != null) {
+            return existing;
+        }
+        PendingToolCall createTask = new PendingToolCall();
+        createTask.setToolCallId(form.getCreateTaskToolCallId());
+        createTask.setName(TOOL_CREATE_TASK);
+        createTask.setType("function");
+        createTask.setArguments(ObjectUtils.defaultIfNull(canonicalArguments, form.getCreateTaskArguments()));
+        createTask.setKind(PendingToolCall.KIND_CONFIRM);
+        createTask.setIrreversible(false);
+        return createTask;
+    }
+
+    private CreateTaskDetailsResume resumeResolvedCreateTask(String runId, AiContext context, List<Message> history,
+                                                              String merged,
+                                                              CreateTaskReferenceResolver.Resolution resolution,
+                                                              PendingToolCall createTask) {
+        if (createTask.resolved() && !PendingToolCall.PENDING.equals(createTask.getStatus())) {
+            return settledCreateTask(merged, resolution, createTask);
+        }
+        if (!this.toolRegistry.isContextMatched(createTask.getName(), context)) {
+            blockOutOfScope(runId, context, createTask);
+            return settledCreateTask(merged, resolution, createTask);
+        }
+        CreateTaskInRun prior = createTaskAlreadyInRun(runId);
+        if (prior.created()) {
+            markCreateTaskLimit(runId, createTask, prior);
+            return settledCreateTask(merged, resolution, createTask);
+        }
+        if (!inspectResumedCreateTask(runId, context, createTask)) {
+            return settledCreateTask(merged, resolution, createTask);
+        }
+        parkResumedCreateTask(runId, history, createTask);
+        return new CreateTaskDetailsResume(CreateTaskDetailsResumeStatus.PARKED, merged, resolution, createTask);
+    }
+
+    private boolean inspectResumedCreateTask(String runId, AiContext context, PendingToolCall createTask) {
+        if (this.preflight == null || !ToolPreflightService.isSupported(createTask.getName())) {
+            return true;
+        }
+        ToolPreflightService.PreflightReport report;
+        try {
+            report = this.preflight.inspect(createTask.getName(), createTask.getArguments(), context);
+        }
+        catch (RuntimeException ex) {
+            blockPreflightUnavailable(runId, createTask, ex);
+            return false;
+        }
+        if (!report.pass()) {
+            blockPreflight(runId, createTask, report);
+            return false;
+        }
+        createTask.setPreflight(report.asMap());
+        return true;
+    }
+
+    private void parkResumedCreateTask(String runId, List<Message> history, PendingToolCall createTask) {
+        RunSnapshot snapshot = this.store.get(runId);
+        String content = snapshot == null ? null : snapshot.getAssistantContent();
+        Map<String, Object> metadata = snapshot == null ? null : snapshot.getAssistantMetadata();
+        this.store.saveSuspended(runId, content, this.registry.of(runId).transcriptFullText(), List.of(createTask),
+                history, this.codec, metadata);
+        SseChatEmitter out = this.registry.of(runId);
+        out.suspended(List.of(createTask), this.store.runKey(runId), this.store.pendingKey(runId), this.store.instanceId());
+        out.toolStart(createTask);
+        this.gate.publishRequestsForParkedBatch(runId, List.of(createTask));
+        out.completeSubscriptions();
+    }
+
+    private static CreateTaskDetailsResume settledCreateTask(String merged,
+                                                              CreateTaskReferenceResolver.Resolution resolution,
+                                                              PendingToolCall createTask) {
+        return new CreateTaskDetailsResume(CreateTaskDetailsResumeStatus.SETTLED, merged, resolution, createTask);
+    }
 
     /**
      * 续跑阶段结算一个挂起条目（{@code ResumeService} 的重建路径专用，SP-02 §5.5）。

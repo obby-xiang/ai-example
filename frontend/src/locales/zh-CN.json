@@ -397,7 +397,8 @@
       "purpose": {
         "selectDefinitions": "选择配置项",
         "setConditions": "设置筛选条件",
-        "taskType": "选择任务类型"
+        "taskType": "选择任务类型",
+        "createTaskDetails": "补充创建信息"
       },
       "selectPlaceholder": "请选择{label}",
       "multiSelect": {
