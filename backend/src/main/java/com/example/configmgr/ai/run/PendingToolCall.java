@@ -45,7 +45,7 @@ public class PendingToolCall {
     public static final String APPROVED = "APPROVED";
 
     /**
-     * 人工已拒绝。
+     * 人工已拒绝：恢复准入将当前 run 终止为 {@link RunSnapshot#CANCELLED}，不再驱动模型。
      */
     public static final String REJECTED = "REJECTED";
 
@@ -60,9 +60,9 @@ public class PendingToolCall {
     public static final String FRONTEND_RESULT = "FRONTEND_RESULT";
 
     /**
-     * 前端用户主动放弃（关闭/取消表单等）：<b>明确终态</b> —— 未获得任何数据，本轮循环继续
-     * （模型据"用户取消"收尾）。与 {@link #CANCELLED}（整轮被取消）分开记：前者只结束这一次
-     * 工具调用，后者终止整轮。
+     * 前端用户主动放弃（关闭/取消表单等）：<b>明确终态</b> —— 未获得任何数据，恢复准入将当前 run
+     * 终止为 {@link RunSnapshot#CANCELLED}，不重建工具、不驱动模型，也不再发同类卡。
+     * 与 {@link #CANCELLED} 分开记：前者保留用户放弃的是哪次工具调用，后者是整轮取消事实。
      */
     public static final String FRONTEND_CANCELLED = "FRONTEND_CANCELLED";
 

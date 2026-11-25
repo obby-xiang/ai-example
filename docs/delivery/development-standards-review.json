@@ -8375,6 +8375,77 @@
           "reason": "证据来源为控制器b107f8f6报告，启动门禁通过、真实模型3/3 FAIL分别记录；本批未改代码、未运行测试或模型、未启动服务，未新增根因推测，真实失败未包装成PASS。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:3878e049ce8116fed1e0af2cae60890312d76df808dbc0b542896215cab0bb0c",
+      "status": "reviewed",
+      "reason": "对最终暂存的五个生产文件逐hunk复核：ResumeService以快照in-flight ID筛选最新pendings，仅FRONTEND_CANCELLED/REJECTED进入cancelParked和CANCELLED复读，位置先于未决闸及全部重建；ConditionsForm旧专用取消分支及其死测试删除，四份现行注释同步，系统REJECTED_ARGUMENTS仍走原重建路径。",
+      "reviewedAt": "2026-11-26T00:40:32+08:00",
+      "reviewer": "Kimi Code施工上下文静态逐hunk自审（按任务要求未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "本批in-flight工具出现用户主动取消FRONTEND_CANCELLED或人工拒绝REJECTED时，当前run在恢复准入直接终止为CANCELLED，不再重建工具、调用模型或发放后续同类卡；REJECTED_ARGUMENTS、TIMEOUT等系统结论不视为用户决策。",
+          "reason": "旧通用重建把用户取消/拒绝回填后再次driveResumed，模型会重复发起同类工具并重弹卡，CREATE_TASK_DETAILS取消已实际重复四次；需要统一用户决策语义而非按表单继续补丁。",
+          "impact": "影响ResumeService全部恢复入口及create_task、start_export、generative_form、表格等本批in-flight确认/前端工具；ConditionsForm专用后置取消分支由统一入口取代，批准、正常表单提交和系统参数拒绝的既有重建语义不变。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/ConditionsForm.java",
+          "status": "checked",
+          "reason": "删除仅识别SET_CONDITIONS且位于模型重建后的conditionFormCancelledInBatch，保留条件收集主流程；两处注释改为ResumeService准入统一终止，未新增表单特例。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/ConfirmGate.java",
+          "status": "checked",
+          "reason": "类级取消说明和死卡恢复注释由模型自行收尾改为用户决策直接终止run，结算状态写入、回灌帧和批准路径代码未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/PendingToolCall.java",
+          "status": "checked",
+          "reason": "REJECTED与FRONTEND_CANCELLED注释明确恢复时run CANCELLED且不驱动模型，保留工具决策事实与整轮CANCELLED状态的区别；字段和JSON契约未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java",
+          "status": "checked",
+          "reason": "checkResumeAdmission在未决闸前调用统一userDecisionResumeResult；该方法仅用快照in-flight ID匹配最新pendings的两个用户状态，调用既有cancelParked并复读CANCELLED，失败复用resumeStatusWriteRefused，旧ConditionsForm后置分支及过时类注释同步删除。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java",
+          "status": "checked",
+          "reason": "generative_form取消契约由模型收到取消后收尾改为当前run CANCELLED且不再调用模型或发同类表单，工具Schema、参数校验和提示词未改。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用既有JDK Set/Collectors、ResilientChatService.cancelParked和resumeStatusWriteRefused，没有新增或升级依赖，也未引入表单专用框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增userDecisionResumeResult低于50行且复杂度低于20，if保留大括号，布尔局部变量语义明确；未新增import、集合返回、JSON字段或Lombok相等性实现，废弃方法和测试直接删除。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "未新增日志、异常捕获或对外错误文本；取消写未确认时沿用既有typed写拒绝结局，不吞异常、不伪造CANCELLED，也不暴露上游响应。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "用户取消或拒绝后不再由模型重发同类卡，排队中的其它卡不被提升；未修改前端组件、文案、样式或卡片布局。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "终止判定限定当前快照in-flight并读取最新store pendings，取消后复读真实快照且仅CANCELLED返回ALREADY_CANCELLED；REJECTED_ARGUMENTS继续重建，未新增Redis键、数据库访问、模型请求或共享可变状态。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批仅比较工具ID和状态枚举，不处理文本、字节流、SSE分片、代理对或截断。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "七个用户决策方法先取得预期RED，REJECTED_ARGUMENTS对照基线GREEN；最终八个规格方法与四个批准/未决/直接取消相邻方法均逐方法exit 0，五个生产文件IDEA Reformat ok，GREEN实际编译364源且最终compile和IDEA定点编译成功；按任务禁令未运行测试类/套件、真实模型或服务，完整命令与中间夹具修正记录于仓外报告。"
+        }
+      }
     }
   ]
 }

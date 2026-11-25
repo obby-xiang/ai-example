@@ -84,9 +84,10 @@ import java.util.stream.Collectors;
  * <li>{@code APPROVED 且 executed=false}（SP-02 E2 的"已放行未执行"窗口，例如放行后进程死亡）
  * → 本次<b>补执行</b>，认领与台账都记在新实例名下；</li>
  * <li>{@code executed=true} → 说明上一实例已完成，直接复用其 {@code resultText}；</li>
- * <li>其余一旦有结论的条目（{@code REJECTED/TIMEOUT/FRONTEND_RESULT/FRONTEND_CANCELLED}、
- * 入参被安全闸拒绝的 {@code REJECTED_ARGUMENTS}、越 scope 的 {@code BLOCKED}）
- * → 以"未执行/已回灌"语义回填，<b>不执行</b>。</li>
+ * <li>其余系统结论（{@code TIMEOUT/FRONTEND_RESULT}、入参被安全闸拒绝的
+ * {@code REJECTED_ARGUMENTS}、越 scope 的 {@code BLOCKED}）→ 以"未执行/已回灌"语义回填，<b>不执行</b>；</li>
+ * <li>本批 in-flight 条目若为用户取消（{@code FRONTEND_CANCELLED}）或拒绝（{@code REJECTED}），
+ * 在重建前统一取消当前 run，不重建工具、不驱动模型。</li>
  * </ul>
  *
  * <h2>准入与互斥</h2>
@@ -1278,6 +1279,8 @@ public class ResumeService {
         if (result != null) return result;
         result = providerResumeResult(state);
         if (result != null) return result;
+        result = userDecisionResumeResult(state);
+        if (result != null) return result;
         result = unresolvedResumeResult(state);
         if (result != null) return result;
         result = sessionGateResumeResult(state);
@@ -1424,6 +1427,27 @@ public class ResumeService {
             return providerGone(state.runId, state.snapshot, "该 provider/模型此刻不可用");
         }
         return null;
+    }
+
+    private ResumeResult userDecisionResumeResult(ResumeState state) {
+        Set<String> inFlightIds = state.snapshot.getInFlightToolCalls().stream()
+                .map(PendingToolCall::getToolCallId)
+                .collect(Collectors.toSet());
+        boolean userDecision = state.pendings.stream()
+                .filter(pending -> inFlightIds.contains(pending.getToolCallId()))
+                .anyMatch(pending -> PendingToolCall.FRONTEND_CANCELLED.equals(pending.getStatus())
+                        || PendingToolCall.REJECTED.equals(pending.getStatus()));
+        if (!userDecision) {
+            return null;
+        }
+        this.chatService.cancelParked(state.runId);
+        RunSnapshot latest = this.store.get(state.runId);
+        if (latest != null && RunSnapshot.CANCELLED.equals(latest.getStatus())) {
+            state.body.put("resumed", false);
+            state.body.put("reason", "ALREADY_CANCELLED");
+            return new ResumeResult(Outcome.ALREADY_CANCELLED, state.body);
+        }
+        return resumeStatusWriteRefused(state.runId, state.body);
     }
 
     private ResumeResult unresolvedResumeResult(ResumeState state) {
@@ -1684,18 +1708,6 @@ public class ResumeService {
     }
 
     private ResumeResult parkConditionForms(ResumeState state) {
-        if (this.conditionsForm != null && this.conditionsForm.conditionFormCancelledInBatch(state.settledInBatch,
-                state.runId, state.nextHopContext)) {
-            this.chatService.cancelParked(state.runId);
-            RunSnapshot latest = this.store.get(state.runId);
-            if (latest != null && RunSnapshot.CANCELLED.equals(latest.getStatus())) {
-                state.body.put("resumed", false);
-                state.body.put("reason", "ALREADY_CANCELLED");
-                state.body.put("taskId", state.nextHopContext.getTaskId());
-                return new ResumeResult(Outcome.ALREADY_CANCELLED, state.body);
-            }
-            return resumeStatusWriteRefused(state.runId, state.body);
-        }
         state.enteredQueryCond = state.settledInBatch.stream()
                 .anyMatch(pending -> pending != null && "confirm_step".equals(pending.getName())
                         && com.example.configmgr.ai.tool.ToolOutcome.OK == pending.effectiveOutcome());

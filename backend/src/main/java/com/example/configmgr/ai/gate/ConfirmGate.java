@@ -123,7 +123,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * 不该把挂起消费掉，否则用户再没机会改对；</li>
  * <li><b>取消终态</b>：前端带 {@code cancelled=true} 回灌（用户关闭/放弃表单）⇒
  * {@link PendingToolCall#FRONTEND_CANCELLED}（明确终态，不是"未决悬置"），结局帧
- * {@code frontend_tool_result(ok=false)} 与"前端超时"同形，模型据此收尾。</li>
+ * {@code frontend_tool_result(ok=false)} 与"前端超时"同形；恢复准入随后终止当前 run，不再驱动模型。</li>
  * </ul>
  * 两道闸门都<b>按工具名自认领</b>（{@code supports}），本类对具体工具名零知识。
  *
@@ -2512,8 +2512,8 @@ public class ConfirmGate {
      * {@code ResumeService} 对仍 {@code PENDING} 的外部项返回 {@code PENDING_UNRESOLVED} 也不驱动 ——
      * 于是"快照 SUSPENDED + 已无进程等待"在重启后是一个<b>稳态</b>。而此刻外部输入刚到，
      * 条目已经 {@code APPROVED}/{@code REJECTED}/{@code FRONTEND_RESULT}/{@code FRONTEND_CANCELLED}
-     * （都不是 PENDING），续跑会走正常路径（重建历史 → 执行已决工具），死闸门组合天然消失，
-     * 不需要任何"活闸门检测"（原 S3-7 方案作废）。
+     * （都不是 PENDING）。用户拒绝/取消由恢复准入直接终止当前 run；其余已决条目走正常重建路径，
+     * 死闸门组合天然消失，不需要任何"活闸门检测"（原 S3-7 方案作废）。
      *
      * <h2>五个前置判据（缺一不触发）</h2>
      * <ol>

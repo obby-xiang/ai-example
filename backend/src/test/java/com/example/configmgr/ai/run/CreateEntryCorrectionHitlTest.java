@@ -7,6 +7,7 @@ import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.CreateTaskReferenceResolver;
 import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.gate.ToolPreflightService;
@@ -84,7 +85,7 @@ class CreateEntryCorrectionHitlTest {
 
     private static final String CALL_ID = "call-create-entry";
 
-    private static final String ARGUMENTS = "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"conditions\":{}}";
+    private static final String ARGUMENTS = "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[],\"conditions\":{}}";
 
     private final InMemoryRunStore store = new InMemoryRunStore(true) {
         @Override
@@ -166,6 +167,7 @@ class CreateEntryCorrectionHitlTest {
         SpToolCallingManager manager = new SpToolCallingManager(this.store, this.registry, this.gate, toolRegistry,
                 this.codec, this.beacon, this.cancellations, new ToolResultLimiter(this.properties), List.of(),
                 preflight, null, null, null, this.properties);
+        manager.setCreateTaskReferenceResolver(new CreateTaskReferenceResolver(List::of, this.mapper));
         manager.setContextRefresher(new RunContextRefresher(this.taskService));
         ReflectionTestUtils.setField(manager, "transcript", this.transcript);
         this.model = new ReasoningAwareOpenAiChatModel(this.api,
@@ -215,7 +217,7 @@ class CreateEntryCorrectionHitlTest {
                 new AiConfigService.ResolvedProvider(7L, "openai", "http://placeholder", "/chat/completions",
                         "test-model", "sk-test-0123456789", "fp", false), "test-model", true)));
         when(this.providerRegistry.forFrozenRequest(any(), any(), any(), any(),
-                org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(runtime);
+                org.mockito.ArgumentMatchers.anyBoolean(), any(), any())).thenReturn(runtime);
         when(this.streamSpec.chatResponse()).thenAnswer(invocation -> Flux.just(response("请先告诉我要导出的配置")));
         when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
                 .thenReturn(Flux.just(toolCallChunk(CALL_ID, AiToolNames.CREATE_TASK, ARGUMENTS)),
@@ -368,11 +370,11 @@ class CreateEntryCorrectionHitlTest {
         ConfirmGate.Submission submission = submitDecision(false);
 
         assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+        org.mockito.Mockito.verify(this.api).chatCompletionStream(any(ChatCompletionRequest.class), any());
+        assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
         assertThat(this.store.pending(RUN_ID, CALL_ID).getStatus()).isEqualTo(PendingToolCall.REJECTED);
         verifyNoInteractions(this.taskService);
         verifyNoInteractions(this.jobService);
-        org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
-                .chatCompletionStream(any(ChatCompletionRequest.class), any());
         assertThat(this.store.ledger(RUN_ID)).noneMatch(record -> AiToolNames.CREATE_TASK.equals(record.get("name"))
                 && Boolean.TRUE.equals(record.get("executed")));
     }
@@ -677,7 +679,7 @@ class CreateEntryCorrectionHitlTest {
         when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(runtime));
         when(this.providerRegistry.forRequest(any(), any(), any())).thenReturn(runtime);
         when(this.providerRegistry.forFrozenRequest(any(), any(), any(), any(),
-                org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(runtime);
+                org.mockito.ArgumentMatchers.anyBoolean(), any(), any())).thenReturn(runtime);
     }
 
     private void chat() {

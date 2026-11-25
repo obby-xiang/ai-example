@@ -893,8 +893,8 @@ public class AiTools {
      * {@code yyyy-MM-dd} 合法日期、enum/multi_select 的值必须在选项内、未知字段拒绝、必填缺失拒绝），
      * 不符即 400 {@code FORM_RESULT_REJECTED} 且<b>挂起保持未决</b>（可修正后重试）；</li>
      * <li><b>取消终态</b>：用户关闭表单 ⇒ 前端以 {@code POST /api/ai/frontend-tool-result{...,cancelled:true}}
-     * 回灌，待决条目落 {@code FRONTEND_CANCELLED}（明确终态，不会无限悬置），模型收到
-     * "用户取消，未获得数据"后自行收尾。</li>
+     * 回灌，待决条目落 {@code FRONTEND_CANCELLED}（明确终态，不会无限悬置），恢复准入随即将当前 run
+     * 终止为 {@code CANCELLED}；不再调用模型，也不再发同类表单。</li>
      * </ol>
      * <b>等待没有上限</b>（用户裁决 2026-10-20 第 2 条）：{@code generative_form} 等的是人填表，
      * 不套用 {@code app.ai.hitl.frontend-tool-timeout}（那个键只给 {@code navigate_to} 等即时执行类

@@ -328,22 +328,6 @@ public class ConditionsForm extends HostForm {
      * </ul>
      * 不改变 {@code start_export} 确认门，也不自动执行/下载。
      */
-    public boolean conditionFormCancelledInBatch(List<PendingToolCall> settledBatch, String runId, AiContext context) {
-        if (settledBatch == null || context == null || context.getTaskId() == null
-                || !TaskSteps.QUERY_COND.equals(TaskSteps.normalize(context.getStep()))) {
-            return false;
-        }
-        long taskId = context.getTaskId();
-        for (PendingToolCall pending : settledBatch) {
-            if (pending != null && PendingToolCall.FRONTEND_CANCELLED.equals(pending.getStatus())
-                    && GenerativeFormRules.TOOL_NAME.equals(pending.getName())
-                    && isConditionForm(pending.getArguments()) && isBoundToTask(pending.getToolCallId(), runId, taskId)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history) {
         return parkIfDueAtQueryCond(runId, context, history, true);
     }
@@ -354,7 +338,7 @@ public class ConditionsForm extends HostForm {
      *                         通道结构化用户已给出的值）；{@code true} = 条件仍未知时挂一次条件表。
      *                         已知候选/已落库条件在两种口径下都不受影响。
      *                         快照 {@code unavailable=true} 时在任务读取前失败关闭，不生成任何新动作；
-     *                         既有表单取消结算仍由 {@link #conditionFormCancelledInBatch} 处理。
+     *                         既有表单取消由 {@code ResumeService} 在恢复准入时统一终止当前 run。
      */
     public boolean parkIfDueAtQueryCond(String runId, AiContext context, List<Message> history,
                                         boolean allowUnknownForm) {
@@ -432,7 +416,7 @@ public class ConditionsForm extends HostForm {
             return false;
         }
         if (evaluation.feedback().cancelled()) {
-            // 取消：不自动重问（恢复通道由 confirm_step 拒绝说明）
+            // 取消：当前 run 已由恢复准入统一终止，此处兜底不自动重问
             return false;
         }
         if (!allowUnknownForm) {

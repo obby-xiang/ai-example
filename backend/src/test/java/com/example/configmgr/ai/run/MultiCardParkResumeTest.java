@@ -137,9 +137,113 @@ class MultiCardParkResumeTest {
 		verify(this.chatService, org.mockito.Mockito.never()).driveResumed(any(), any(), any(), any(), any());
 	}
 
+	@Test
+	void taskTypeFormCancellationCancelsRunBeforeTheUnresolvedGate() {
+		seedTools(frontendEntry(CALL_1, "generative_form",
+				"{\"form\":{\"purpose\":\"TASK_TYPE\",\"scenario\":\"CLARIFY\",\"fields\":[]}}",
+				PendingToolCall.FRONTEND_CANCELLED), entry(CALL_2, "{\"taskId\":9}", PendingToolCall.PENDING));
+		stubCancelParked();
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertCancelledWithoutModel(result);
+		assertThat(this.store.pendingsLenient(RUN_ID)).hasSize(2);
+	}
+
+	@Test
+	void rejectedStartExportCancelsRunWithoutStartingOrDriving() {
+		PendingToolCall startExport = entry(CALL_1, "{\"taskId\":7}", PendingToolCall.REJECTED);
+		startExport.setName("start_export");
+		seedTools(startExport);
+		stubCancelParked();
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertCancelledWithoutModel(result);
+		assertThat(this.store.pending(RUN_ID, CALL_1).isExecuted()).isFalse();
+	}
+
+	@Test
+	void sheetCancellationUsesTheSameRunTermination() {
+		seedTools(frontendEntry(CALL_1, "replace_values", "{\"sheetId\":7}",
+				PendingToolCall.FRONTEND_CANCELLED));
+		stubCancelParked();
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertCancelledWithoutModel(result);
+		assertThat(this.store.pendingsLenient(RUN_ID)).hasSize(1);
+	}
+
+	@Test
+	void rejectedArgumentsStillRebuildsAndDrivesTheModel() {
+		PendingToolCall rejected = frontendEntry(CALL_1, "generative_form", "{\"form\":{}}",
+				PendingToolCall.REJECTED_ARGUMENTS);
+		rejected.setOutcome(ToolOutcome.REJECTED.wire());
+		rejected.setCode("FORM_SCHEMA_REJECTED");
+		rejected.setResultText("schema rejected");
+		seedTools(rejected);
+		stubDrive();
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.RUNNING);
+		verify(this.chatService, times(1)).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any(),
+				eq(this.emitter));
+		verify(this.chatService, org.mockito.Mockito.never()).cancelParked(RUN_ID);
+		verify(this.toolCallingManager).resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class));
+	}
+
+	@Test
+	void cancellingTheLastQueuedFormDoesNotDriveOrPromoteAnotherCard() {
+		seedTools(entry(CALL_1, "{\"taskId\":7}", PendingToolCall.APPROVED), frontendEntry(CALL_2, "generative_form",
+				"{\"form\":{\"purpose\":\"TASK_TYPE\",\"scenario\":\"CLARIFY\",\"fields\":[]}}",
+				PendingToolCall.FRONTEND_CANCELLED));
+		stubCancelParked();
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertCancelledWithoutModel(result);
+		assertThat(this.store.pendingsLenient(RUN_ID)).hasSize(2);
+	}
+
+	private void assertCancelledWithoutModel(ResumeService.ResumeResult result) {
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ALREADY_CANCELLED);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+		verify(this.chatService).cancelParked(RUN_ID);
+		verify(this.chatService, org.mockito.Mockito.never()).driveResumed(any(), any(), any(), any(), any());
+		verify(this.toolCallingManager, org.mockito.Mockito.never()).resolvePending(any(), any(), any());
+	}
+
+	private void stubDrive() {
+		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
+		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
+			.thenReturn(new Prompt(List.of()));
+		when(this.toolCallingManager.resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class)))
+			.thenReturn("已执行");
+		doAnswer(invocation -> {
+			invocation.getArgument(0, Runnable.class).run();
+			return null;
+		}).when(this.executor).execute(any(Runnable.class));
+	}
+
+	private void stubCancelParked() {
+		doAnswer(invocation -> {
+			RunSnapshot snapshot = this.store.get(RUN_ID);
+			snapshot.setStatus(RunSnapshot.CANCELLED);
+			this.store.save(snapshot);
+			return null;
+		}).when(this.chatService).cancelParked(RUN_ID);
+	}
+
 	// ── 辅助 ────────────────────────────────────────────────────────────────
 
 	private void seedSuspendedRun(String firstStatus, String secondStatus) {
+		seedTools(entry(CALL_1, "{\"taskId\":7}", firstStatus), entry(CALL_2, "{\"taskId\":9}", secondStatus));
+	}
+
+	private void seedTools(PendingToolCall... pendings) {
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
 		snapshot.setTenantId(1L);
 		snapshot.setUserId(101L);
@@ -147,14 +251,20 @@ class MultiCardParkResumeTest {
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setContext(AiContext.empty().toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("启动两个导入"))));
-		List<PendingToolCall> inFlight = new ArrayList<>();
-		inFlight.add(entry(CALL_1, "{\"taskId\":7}", firstStatus));
-		inFlight.add(entry(CALL_2, "{\"taskId\":9}", secondStatus));
-		snapshot.setInFlightToolCalls(inFlight);
+		snapshot.setInFlightToolCalls(new ArrayList<>(List.of(pendings)));
 		this.store.save(snapshot);
-		for (PendingToolCall pending : inFlight) {
+		for (PendingToolCall pending : pendings) {
 			this.store.putPending(RUN_ID, pending);
 		}
+	}
+
+	private static PendingToolCall frontendEntry(String callId, String name, String arguments, String status) {
+		PendingToolCall pending = entry(callId, arguments, status);
+		pending.setName(name);
+		pending.setKind(PendingToolCall.KIND_FRONTEND);
+		pending.setOutcome(ToolOutcome.CANCELLED.wire());
+		pending.setResultText("用户取消");
+		return pending;
 	}
 
 	private static PendingToolCall entry(String callId, String arguments, String status) {

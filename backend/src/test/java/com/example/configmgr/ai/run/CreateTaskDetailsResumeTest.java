@@ -43,6 +43,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -188,15 +189,22 @@ class CreateTaskDetailsResumeTest {
     void cancelDoesNotCreateTaskOrJob() {
         PendingToolCall parked = seedParked(ENUM_ARGUMENTS, enumGap("usd"));
         GateCalls.submit(this.gate, RUN_ID, parked.getToolCallId(), "{}", "unit-test", true);
+        clearInvocations(this.emitter);
+        stubCancelParked();
 
         ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
-        assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+        assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ALREADY_CANCELLED);
+        assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+        verify(this.chatService).cancelParked(RUN_ID);
+        verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
         verifyNoInteractions(this.preflight);
         verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+        verify(this.emitter, never()).frontendToolRequest(any(PendingToolCall.class), any());
         assertThat(this.store.pending(RUN_ID, ORIGINAL_CALL)).isNull();
         assertThat(this.store.ledger(RUN_ID)).isEmpty();
-        assertThat(this.store.pendingsLenient(RUN_ID)).allSatisfy(pending -> {
+        assertThat(this.store.pendingsLenient(RUN_ID)).hasSize(1).allSatisfy(pending -> {
+            assertThat(pending.getStatus()).isNotEqualTo(PendingToolCall.PENDING);
             assertThat(pending.getCreatedTaskId()).isNull();
             assertThat(pending.getCreatedJobId()).isNull();
         });
@@ -278,15 +286,22 @@ class CreateTaskDetailsResumeTest {
         assertThat(read(parked.getArguments()).path("form").path("fields").get(0).path("type").asText())
                 .isEqualTo("multi_select");
         GateCalls.submit(this.gate, RUN_ID, parked.getToolCallId(), "{}", "unit-test", true);
+        clearInvocations(this.emitter);
+        stubCancelParked();
 
         ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
-        assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+        assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ALREADY_CANCELLED);
+        assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+        verify(this.chatService).cancelParked(RUN_ID);
+        verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
         verifyNoInteractions(this.preflight);
         verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+        verify(this.emitter, never()).frontendToolRequest(any(PendingToolCall.class), any());
         assertThat(this.store.pending(RUN_ID, ORIGINAL_CALL)).isNull();
         assertThat(this.store.ledger(RUN_ID)).isEmpty();
-        assertThat(this.store.pendingsLenient(RUN_ID)).allSatisfy(pending -> {
+        assertThat(this.store.pendingsLenient(RUN_ID)).hasSize(1).allSatisfy(pending -> {
+            assertThat(pending.getStatus()).isNotEqualTo(PendingToolCall.PENDING);
             assertThat(pending.getCreatedTaskId()).isNull();
             assertThat(pending.getCreatedJobId()).isNull();
         });
@@ -450,6 +465,15 @@ class CreateTaskDetailsResumeTest {
         verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
         verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
         assertThat(this.store.ledger(RUN_ID)).isEmpty();
+    }
+
+    private void stubCancelParked() {
+        doAnswer(invocation -> {
+            RunSnapshot snapshot = this.store.get(RUN_ID);
+            snapshot.setStatus(RunSnapshot.CANCELLED);
+            this.store.save(snapshot);
+            return null;
+        }).when(this.chatService).cancelParked(RUN_ID);
     }
 
     private PendingToolCall waitingDetailsForm() {

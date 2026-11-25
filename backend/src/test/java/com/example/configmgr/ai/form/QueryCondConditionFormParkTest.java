@@ -377,21 +377,6 @@ class QueryCondConditionFormParkTest {
 		assertNoNewConditionAction(candidate);
 	}
 
-	@Test
-	void unavailableSlotsDoNotBlockConditionFormCancellationSettlement() {
-		this.taskState.set(task(null));
-		PendingToolCall cancelled = new PendingToolCall();
-		cancelled.setToolCallId(ConditionsForm.toolCallId(RUN_ID, TASK_ID));
-		cancelled.setName(GenerativeFormRules.TOOL_NAME);
-		cancelled.setArguments("{\"form\":{\"purpose\":\"SET_CONDITIONS\",\"scenario\":\"FILTER\",\"fields\":[]}}");
-		cancelled.setStatus(PendingToolCall.FRONTEND_CANCELLED);
-
-		assertThat(this.form.conditionFormCancelledInBatch(List.of(cancelled), RUN_ID, unavailableContext()))
-			.as("快照闸只阻止新动作，不得吞掉既有表单取消结算")
-			.isTrue();
-		verify(this.taskService, never()).findById(any());
-	}
-
 	private static AiContext unavailableContext() {
 		return AiContext.of("export", "EXPORT", "QUERY_COND", TASK_ID, "ACTIVE",
 				Map.of(TaskSlots.EXTRA_KEY, TaskSlots.unavailable("EXPORT").toMap()));
