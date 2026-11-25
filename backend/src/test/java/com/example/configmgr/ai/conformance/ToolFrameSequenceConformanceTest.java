@@ -12,6 +12,7 @@ import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolMeta;
@@ -49,6 +50,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -62,10 +64,10 @@ import static org.mockito.Mockito.when;
  * {@link ConfirmGate} 状态机 + 真实的 {@link SseChatEmitter}，只把工具元数据（{@link ToolRegistry}）、
  * 外置状态（{@link InMemoryRunStore}）与取消标志做成替身；被测对象是<b>帧序本身</b>：
  * <ol>
- * <li>{@code tool_start} 必有配对结局帧（后端执行 {@code tool_result}、确认门拒绝 {@code tool_result}、
- * 前端通道 {@code frontend_tool_result}），且每个工具调用<b>恰好一个</b>结局帧（多一个 = 重复执行）；</li>
- * <li>确认门两路（放行/拒绝）：{@code confirm_request} → {@code confirm_decision} → {@code tool_result}，
- * 放行才认领+记台账（恰好执行一次），拒绝既不认领也不执行；</li>
+ * <li>{@code tool_start} 必有配对结局帧（后端执行 {@code tool_result}、前端通道
+ * {@code frontend_tool_result}），且每个工具调用<b>恰好一个</b>结局帧（多一个 = 重复执行）；用户拒绝
+ * 则由管理器抛出 CANCELLED，不再产生模型结果帧；</li>
+ * <li>确认门两路（放行/拒绝）：放行才认领+记台账（恰好执行一次），拒绝既不认领也不执行并终止本轮；</li>
  * <li>前端通道：{@code tool_start} → {@code frontend_tool_request} →（回灌）{@code frontend_tool_result}
  * 且 {@code executed=false}；回灌后<b>重放同一 toolCallId 不产生第二帧</b>（幂等，绝不二次执行）；</li>
  * <li>{@code suspended}（挂起态已外置的公告）必须先于 {@code tool_start}（硬规范①在帧序上的投影）。</li>
@@ -117,8 +119,11 @@ class ToolFrameSequenceConformanceTest {
 
 	private ExecutorService decisionThread;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.decisionThread = Executors.newSingleThreadExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "conformance-decision");
 			thread.setDaemon(true);
@@ -128,7 +133,10 @@ class ToolFrameSequenceConformanceTest {
 		when(this.cancellations.onCancel(anyString(), any(Runnable.class))).thenReturn(() -> {
 		});
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
+		when(this.toolRegistry.isContextMatched(anyString(), any(AiContext.class))).thenReturn(true);
 		RunSnapshot snapshot = this.store.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setContext(AiContext.of("export", "EXPORT", "EXPORT", 7L, null).toMap());
 		this.store.save(snapshot);
 	}
@@ -136,6 +144,7 @@ class ToolFrameSequenceConformanceTest {
 	@AfterEach
 	void tearDown() {
 		this.decisionThread.shutdownNow();
+		this.identity.close();
 	}
 
 	// ── ⑦ 确认门：放行 ──────────────────────────────────────────────────────
@@ -231,39 +240,40 @@ class ToolFrameSequenceConformanceTest {
 	// ── ⑦ 确认门：拒绝 ──────────────────────────────────────────────────────
 
 	@Test
-	void rejectedConfirmPathEmitsResultWithoutExecuting() throws Exception {
-		stubConfirmTool("start_import");
-		SseChatEmitter out = this.registry.of(RUN_ID);
-		FrameWire wire = FrameWire.attachTo(out);
-		out.start(SESSION_ID);
+	void rejectedConfirmPathCancelsWithoutExecutingOrModelResult() throws Exception {
+		this.store.setDeepCopyPending(true);
+		try {
+			stubConfirmTool("start_import");
+			SseChatEmitter out = this.registry.of(RUN_ID);
+			FrameWire wire = FrameWire.attachTo(out);
+			out.start(SESSION_ID);
 
-		Future<ConfirmGate.Submission> decision = this.decisionThread.submit(() -> {
-			wire.awaitType("confirm_request", 5000L);
-			return this.gate.submitDecision(RUN_ID, CALL_ID, false, "先不导出");
-		});
+			Future<ConfirmGate.Submission> decision = this.decisionThread.submit(() -> {
+				wire.awaitType("confirm_request", 5000L);
+				return this.gate.submitDecision(RUN_ID, CALL_ID, false, "先不导出");
+			});
 
-		ToolExecutionResult result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
-				response("start_import", "{\"taskId\":7}"));
-		assertThat(decision.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
-		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+			assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
+					response("start_import", "{\"taskId\":7}")))
+				.isInstanceOf(StreamViolationException.class)
+				.satisfies(ex -> assertThat(((StreamViolationException) ex).getCode())
+					.isEqualTo(StreamViolationException.CANCELLED));
+			assertThat(decision.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
 
-		List<Map<String, Object>> frames = clientView(wire);
-		List<String> types = FrameContract.types(frames);
-		assertThat(types).containsExactly("start", "suspended", "tool_start", "confirm_request", "confirm_decision",
-				"tool_result", "done");
-		FrameContract.assertConformant(frames);
-
-		assertThat(FrameContract.oneOfType(frames, "confirm_decision")).containsEntry("decision", "reject")
-				.containsEntry("approved", false)
-				.containsEntry("status", PendingToolCall.REJECTED);
-		assertThat(FrameContract.oneOfType(frames, "tool_result")).containsEntry("ok", false)
-				.containsEntry("outcome", ToolOutcome.REJECTED.wire())
-				.containsEntry("executed", false);
-		// 拒绝 ⇒ 零副作用：不认领、不执行、不记台账，回填给模型的是"未执行 + 原因"
-		assertThat(this.fakeStartImport.invocations.get()).isZero();
-		assertThat(this.store.claimedBy(RUN_ID, CALL_ID)).isNull();
-		assertThat(this.store.ledger(RUN_ID)).isEmpty();
-		assertThat(modelEnvelope(result).message()).contains("用户拒绝了该操作，工具未执行").contains("先不导出");
+			List<Map<String, Object>> frames = clientView(wire);
+			List<String> types = FrameContract.types(frames);
+			assertThat(types).containsExactly("start", "suspended", "tool_start", "confirm_request", "confirm_decision");
+			assertThat(FrameContract.oneOfType(frames, "confirm_decision")).containsEntry("decision", "reject")
+					.containsEntry("status", PendingToolCall.REJECTED);
+			assertThat(types).doesNotContain("tool_result");
+			// 拒绝 ⇒ 零副作用：不认领、不执行、不记台账，也不再把拒绝文本交给模型
+			assertThat(this.fakeStartImport.invocations.get()).isZero();
+			assertThat(this.store.claimedBy(RUN_ID, CALL_ID)).isNull();
+			assertThat(this.store.ledger(RUN_ID)).isEmpty();
+		}
+		finally {
+			this.store.setDeepCopyPending(false);
+		}
 	}
 
 	/** 重复决策（前端双击/重发）必须被拒且<b>不产生第二帧</b>（HTTP 层对应 409 DUPLICATE_TOOL_CALL_ID）。 */
@@ -615,52 +625,52 @@ class ToolFrameSequenceConformanceTest {
 	 *     —— 前端据此不武装倒计时、不把按钮置灰；</li>
 	 * <li>跨过多个心跳节拍（2s/拍）期间<b>没有</b>任何收口帧：既无 {@code confirm_decision(timeout)}，
 	 *     也无 {@code tool_result}（旧逻辑在这里就会以 {@code CONFIRM_TIMEOUT} 收摊）；</li>
-	 * <li>人拒绝之后才收口：{@code confirm_decision(decision=reject)} → {@code tool_result}，
-	 *     且零执行。</li>
+	 * <li>人拒绝之后才收口：{@code confirm_decision(decision=reject)} 后管理器抛出 CANCELLED，
+	 *     零执行且没有模型结果帧。</li>
 	 * </ol>
 	 */
 	@Test
 	void confirmRequestCarriesNoDeadlineAndNeverTimesOut() throws Exception {
-		stubConfirmTool("start_import");
-		SseChatEmitter out = this.registry.of(RUN_ID);
-		FrameWire wire = FrameWire.attachTo(out);
-		out.start(SESSION_ID);
-
-		Future<ConfirmGate.Submission> decision = this.decisionThread.submit(() -> {
-			wire.awaitType("confirm_request", 5000L);
-			Map<String, Object> request = FrameContract.oneOfType(wire.frames(), "confirm_request");
-			assertThat(request).as("确认卡没有等待上限").doesNotContainKey("timeoutSeconds").doesNotContainKey("expiresAt");
-			// 跨过多个心跳节拍：旧逻辑在 1s 上限下早已收摊，新逻辑必须仍在等
-			Thread.sleep(2500L);
-			List<Map<String, Object>> sofar = wire.frames();
-			assertThat(FrameContract.ofType(sofar, "confirm_decision")).as("等待期不得有任何决策帧").isEmpty();
-			assertThat(FrameContract.ofType(sofar, "tool_result")).as("等待期不得有工具结局帧").isEmpty();
-			return this.gate.submitDecision(RUN_ID, CALL_ID, false, "先不导入");
-		});
-
-		ToolExecutionResult result;
+		this.store.setDeepCopyPending(true);
 		try {
-			result = this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
-					response("start_import", "{\"taskId\":7}"));
-			assertThat(decision.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
-		}
-		catch (Exception ex) {
-			throw new AssertionError(ex.getCause() == null ? ex : ex.getCause());
-		}
-		out.done(Map.of(), "deepseek-flash", Map.of("cancelled", false));
+			stubConfirmTool("start_import");
+			SseChatEmitter out = this.registry.of(RUN_ID);
+			FrameWire wire = FrameWire.attachTo(out);
+			out.start(SESSION_ID);
 
-		List<Map<String, Object>> frames = clientView(wire);
-		List<Map<String, Object>> business = frames.stream()
-			.filter(frame -> !FrameContract.HEARTBEAT.equals(frame.get("type")))
-			.toList();
-		assertThat(FrameContract.types(business)).containsExactly("start", "suspended", "tool_start",
-				"confirm_request", "confirm_decision", "tool_result", "done");
-		FrameContract.assertConformant(business);
-		assertThat(this.fakeStartImport.invocations.get()).as("拒绝 ⇒ 零执行").isZero();
-		Map<String, Object> decisionFrame = FrameContract.oneOfType(frames, "confirm_decision");
-		assertThat(decisionFrame).containsEntry("decision", "reject").containsEntry("approved", false);
-		ToolResultEnvelope envelope = modelEnvelope(result);
-		assertThat(envelope.outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
+			Future<ConfirmGate.Submission> decision = this.decisionThread.submit(() -> {
+				wire.awaitType("confirm_request", 5000L);
+				Map<String, Object> request = FrameContract.oneOfType(wire.frames(), "confirm_request");
+				assertThat(request).as("确认卡没有等待上限").doesNotContainKey("timeoutSeconds").doesNotContainKey("expiresAt");
+				// 跨过多个心跳节拍：旧逻辑在 1s 上限下早已收摊，新逻辑必须仍在等
+				Thread.sleep(2500L);
+				List<Map<String, Object>> sofar = wire.frames();
+				assertThat(FrameContract.ofType(sofar, "confirm_decision")).as("等待期不得有任何决策帧").isEmpty();
+				assertThat(FrameContract.ofType(sofar, "tool_result")).as("等待期不得有工具结局帧").isEmpty();
+				return this.gate.submitDecision(RUN_ID, CALL_ID, false, "先不导入");
+			});
+
+			assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
+					response("start_import", "{\"taskId\":7}")))
+				.isInstanceOf(StreamViolationException.class)
+				.satisfies(ex -> assertThat(((StreamViolationException) ex).getCode())
+					.isEqualTo(StreamViolationException.CANCELLED));
+			assertThat(decision.get(10, TimeUnit.SECONDS).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+
+			List<Map<String, Object>> frames = clientView(wire);
+			List<Map<String, Object>> business = frames.stream()
+				.filter(frame -> !FrameContract.HEARTBEAT.equals(frame.get("type")))
+				.toList();
+			assertThat(FrameContract.types(business)).containsExactly("start", "suspended", "tool_start",
+					"confirm_request", "confirm_decision");
+			assertThat(FrameContract.types(business)).doesNotContain("tool_result");
+			assertThat(this.fakeStartImport.invocations.get()).as("拒绝 ⇒ 零执行").isZero();
+			Map<String, Object> decisionFrame = FrameContract.oneOfType(frames, "confirm_decision");
+			assertThat(decisionFrame).containsEntry("decision", "reject");
+		}
+		finally {
+			this.store.setDeepCopyPending(false);
+		}
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────

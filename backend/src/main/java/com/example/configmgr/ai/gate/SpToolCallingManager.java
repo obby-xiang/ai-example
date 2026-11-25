@@ -2824,7 +2824,16 @@ public class SpToolCallingManager implements ToolCallingManager {
             return rejectFrontendArguments(runId, pending, verdict);
         }
         PendingToolCall resolved = this.gate.awaitFrontendResult(runId, pending);
+        throwIfUserDecision(resolved);
         return StringUtils.defaultString(resolved.getResultText());
+    }
+
+    private static void throwIfUserDecision(PendingToolCall resolved) {
+        if (PendingToolCall.FRONTEND_CANCELLED.equals(resolved.getStatus())
+                || PendingToolCall.REJECTED.equals(resolved.getStatus())) {
+            throw new StreamViolationException(StreamViolationException.CANCELLED,
+                    "User decision received; closing this turn as cancelled");
+        }
     }
 
     /**
@@ -2933,13 +2942,15 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     /**
-     * 确认门：放行则执行（经资源锁、认领与台账，恰好一次），拒绝（或历史遗留的 TIMEOUT 记录）以"未执行"语义回填并继续循环。
+     * 确认门：放行则执行（经资源锁、认领与台账，恰好一次）；用户拒绝终止本轮，
+     * 历史遗留的 TIMEOUT 记录以"未执行"语义回填并继续循环。
      */
     private String awaitConfirm(String runId, Prompt prompt, PendingToolCall pending, AiContext context) {
         PendingToolCall resolved = this.gate.awaitDecision(runId, pending);
         if (PendingToolCall.APPROVED.equals(resolved.getStatus())) {
             return executeOnce(runId, prompt, resolved, context);
         }
+        throwIfUserDecision(resolved);
         String text = ObjectUtils.defaultIfNull(resolved.getResultText(), "该操作未执行。");
         this.registry.of(runId).toolResult(resolved, false, false, text);
         return text;

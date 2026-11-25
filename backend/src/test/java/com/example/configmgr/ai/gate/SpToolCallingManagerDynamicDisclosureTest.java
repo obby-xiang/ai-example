@@ -8,6 +8,7 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolCategory;
@@ -46,6 +47,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -341,9 +343,10 @@ class SpToolCallingManagerDynamicDisclosureTest {
         assertThat(this.toolRegistry.riskOf("start_export")).isEqualTo(ToolMeta.RiskLevel.DANGER);
         assertThat(this.toolRegistry.channelOf("start_export")).isEqualTo(ToolMeta.Channel.BACKEND);
         confirmRejects();
-        ToolExecutionResult hitl = run(boundary, call("c4", "start_export", "{\"taskId\":7}"));
-
-        assertThat(envelopeOf(hitl, "c4").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
+        assertThatThrownBy(() -> run(boundary, call("c4", "start_export", "{\"taskId\":7}")))
+            .isInstanceOf(StreamViolationException.class)
+            .satisfies(ex -> assertThat(((StreamViolationException) ex).getCode())
+                .isEqualTo(StreamViolationException.CANCELLED));
         verify(this.gate, times(1)).awaitDecision(eq(RUN_ID), any(PendingToolCall.class));
     }
 

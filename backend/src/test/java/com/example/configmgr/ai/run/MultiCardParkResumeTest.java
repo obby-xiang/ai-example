@@ -1,15 +1,20 @@
 package com.example.configmgr.ai.run;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
+import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
@@ -19,12 +24,16 @@ import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ScheduledExecutorService;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -48,13 +57,25 @@ class MultiCardParkResumeTest {
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
+	private final AiProperties properties = new AiProperties();
+
+	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
+
 	private final MessageJsonCodec codec = new MessageJsonCodec(this.mapper);
 
-	private final RunRegistry registry = mock(RunRegistry.class);
+	private final com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity =
+			com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 
-	private final SseChatEmitter emitter = mock(SseChatEmitter.class);
+	private final SseChatEmitter emitter = TestRunRegistryFactory.create(this.store, this.mapper, this.properties)
+		.of(RUN_ID);
 
-	private final ResilientChatService chatService = mock(ResilientChatService.class);
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, this.properties,
+			this.emitter);
+
+	private final ResilientChatService chatService = spy(new ResilientChatService(mock(AiProviderRegistry.class),
+			mock(ChatMemory.class), this.codec, this.store, this.registry, mock(ToolRegistry.class),
+			mock(ContextBuilder.class), mock(AiSessionService.class), this.properties, this.cancellations,
+			mock(ToolActivityBeacon.class), mock(ScheduledExecutorService.class)));
 
 	private final SpToolCallingManager toolCallingManager = mock(SpToolCallingManager.class);
 
@@ -62,22 +83,17 @@ class MultiCardParkResumeTest {
 
 	private final StringRedisTemplate redis = mock(StringRedisTemplate.class);
 
-	private final AiProperties properties = new AiProperties();
-
-	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
-
 	private final ToolResultLimiter limiter = new ToolResultLimiter(this.properties);
 
 	private final ResumeService service = new ResumeService(this.store, this.registry, this.codec, this.chatService,
 			this.toolCallingManager, this.executor, this.redis, this.properties, this.cancellations, this.limiter);
 
-	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
-
 	@org.junit.jupiter.api.BeforeEach
 	void bindIdentity() {
-		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
-		when(this.chatService.systemPromptText(org.mockito.ArgumentMatchers.any(),
-				org.mockito.ArgumentMatchers.anyBoolean())).thenReturn("SYSTEM");
+		this.properties.getPark().setEnabled(true);
+		doReturn("SYSTEM").when(this.chatService).systemPromptText(org.mockito.ArgumentMatchers.any(),
+				org.mockito.ArgumentMatchers.anyBoolean());
+		doNothing().when(this.chatService).driveResumed(any(), any(), any(), any(), any());
 	}
 
 	@org.junit.jupiter.api.AfterEach
@@ -90,11 +106,10 @@ class MultiCardParkResumeTest {
 	@Test
 	void bothApprovedCardsExecuteExactlyOnceEach() {
 		seedSuspendedRun(PendingToolCall.APPROVED, PendingToolCall.APPROVED);
-		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
-			.thenReturn(new Prompt(List.of()));
+		doReturn(new Prompt(List.of())).when(this.chatService).buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID),
+				any(AiContext.class), any());
 		when(this.toolCallingManager.resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class)))
 			.thenReturn("已执行");
-		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
 		doAnswer(invocation -> {
 			invocation.getArgument(0, Runnable.class).run();
 			return null;
@@ -142,12 +157,13 @@ class MultiCardParkResumeTest {
 		seedTools(frontendEntry(CALL_1, "generative_form",
 				"{\"form\":{\"purpose\":\"TASK_TYPE\",\"scenario\":\"CLARIFY\",\"fields\":[]}}",
 				PendingToolCall.FRONTEND_CANCELLED), entry(CALL_2, "{\"taskId\":9}", PendingToolCall.PENDING));
-		stubCancelParked();
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
 		assertCancelledWithoutModel(result);
 		assertThat(this.store.pendingsLenient(RUN_ID)).hasSize(2);
+		assertThat(this.store.pending(RUN_ID, CALL_1).getStatus()).isEqualTo(PendingToolCall.FRONTEND_CANCELLED);
+		assertThat(this.store.pending(RUN_ID, CALL_2).getStatus()).isEqualTo(PendingToolCall.CANCELLED);
 	}
 
 	@Test
@@ -155,11 +171,11 @@ class MultiCardParkResumeTest {
 		PendingToolCall startExport = entry(CALL_1, "{\"taskId\":7}", PendingToolCall.REJECTED);
 		startExport.setName("start_export");
 		seedTools(startExport);
-		stubCancelParked();
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
 		assertCancelledWithoutModel(result);
+		assertThat(this.store.pending(RUN_ID, CALL_1).getStatus()).isEqualTo(PendingToolCall.REJECTED);
 		assertThat(this.store.pending(RUN_ID, CALL_1).isExecuted()).isFalse();
 	}
 
@@ -167,12 +183,55 @@ class MultiCardParkResumeTest {
 	void sheetCancellationUsesTheSameRunTermination() {
 		seedTools(frontendEntry(CALL_1, "replace_values", "{\"sheetId\":7}",
 				PendingToolCall.FRONTEND_CANCELLED));
-		stubCancelParked();
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
 		assertCancelledWithoutModel(result);
 		assertThat(this.store.pendingsLenient(RUN_ID)).hasSize(1);
+		assertThat(this.store.pending(RUN_ID, CALL_1).getStatus()).isEqualTo(PendingToolCall.FRONTEND_CANCELLED);
+	}
+
+	@Test
+	void selectDefinitionsCancellationUsesTheSameRealTerminalConvergence() {
+		seedTools(frontendEntry(CALL_1, "generative_form",
+				"{\"form\":{\"purpose\":\"SELECT_DEFINITIONS\",\"scenario\":\"CLARIFY\",\"fields\":[]}}",
+				PendingToolCall.FRONTEND_CANCELLED), entry(CALL_2, "{\"taskId\":9}", PendingToolCall.PENDING));
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertCancelledWithoutModel(result);
+		assertThat(this.store.pending(RUN_ID, CALL_1).getStatus()).isEqualTo(PendingToolCall.FRONTEND_CANCELLED);
+		assertThat(this.store.pending(RUN_ID, CALL_2).getStatus()).isEqualTo(PendingToolCall.CANCELLED);
+	}
+
+	@Test
+	void uploadCancellationUsesTheSameRealTerminalConvergence() {
+		seedTools(frontendEntry(CALL_1, "ui_request_upload", "{}", PendingToolCall.FRONTEND_CANCELLED));
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertCancelledWithoutModel(result);
+		assertThat(this.store.pending(RUN_ID, CALL_1).getStatus()).isEqualTo(PendingToolCall.FRONTEND_CANCELLED);
+	}
+
+	@Test
+	void timeoutStillRebuildsAndDrivesTheModel() {
+		PendingToolCall timeout = entry(CALL_1, "{\"taskId\":7}", PendingToolCall.TIMEOUT);
+		timeout.setName("start_export");
+		timeout.setOutcome(ToolOutcome.TIMEOUT.wire());
+		timeout.setResultText("系统超时，工具未执行");
+		seedTools(timeout);
+		stubDrive();
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.RUNNING);
+		assertThat(this.store.pending(RUN_ID, CALL_1).getStatus()).isEqualTo(PendingToolCall.TIMEOUT);
+		verify(this.chatService, times(1)).driveResumed(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any(),
+				eq(this.emitter));
+		verify(this.chatService, org.mockito.Mockito.never()).cancelParked(RUN_ID);
+		verify(this.toolCallingManager).resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class));
 	}
 
 	@Test
@@ -200,41 +259,37 @@ class MultiCardParkResumeTest {
 		seedTools(entry(CALL_1, "{\"taskId\":7}", PendingToolCall.APPROVED), frontendEntry(CALL_2, "generative_form",
 				"{\"form\":{\"purpose\":\"TASK_TYPE\",\"scenario\":\"CLARIFY\",\"fields\":[]}}",
 				PendingToolCall.FRONTEND_CANCELLED));
-		stubCancelParked();
 
 		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
 
 		assertCancelledWithoutModel(result);
 		assertThat(this.store.pendingsLenient(RUN_ID)).hasSize(2);
+		assertThat(this.store.pending(RUN_ID, CALL_1).getStatus()).isEqualTo(PendingToolCall.APPROVED);
+		assertThat(this.store.pending(RUN_ID, CALL_2).getStatus()).isEqualTo(PendingToolCall.FRONTEND_CANCELLED);
 	}
 
 	private void assertCancelledWithoutModel(ResumeService.ResumeResult result) {
 		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ALREADY_CANCELLED);
-		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+		RunSnapshot latest = this.store.get(RUN_ID);
+		assertThat(latest.getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+		assertThat(latest.getInFlightToolCalls()).isEmpty();
+		assertThat(this.store.pendingsLenient(RUN_ID)).noneMatch(pending ->
+				PendingToolCall.PENDING.equals(pending.getStatus()));
+		assertThat(this.store.archivedTypes(RUN_ID)).doesNotContain("confirm_request", "frontend_tool_request");
 		verify(this.chatService).cancelParked(RUN_ID);
 		verify(this.chatService, org.mockito.Mockito.never()).driveResumed(any(), any(), any(), any(), any());
 		verify(this.toolCallingManager, org.mockito.Mockito.never()).resolvePending(any(), any(), any());
 	}
 
 	private void stubDrive() {
-		when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
-		when(this.chatService.buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID), any(AiContext.class), any()))
-			.thenReturn(new Prompt(List.of()));
+		doReturn(new Prompt(List.of())).when(this.chatService).buildResumedPrompt(eq(RUN_ID), eq(SESSION_ID),
+				any(AiContext.class), any());
 		when(this.toolCallingManager.resolvePending(eq(RUN_ID), any(Prompt.class), any(PendingToolCall.class)))
 			.thenReturn("已执行");
 		doAnswer(invocation -> {
 			invocation.getArgument(0, Runnable.class).run();
 			return null;
 		}).when(this.executor).execute(any(Runnable.class));
-	}
-
-	private void stubCancelParked() {
-		doAnswer(invocation -> {
-			RunSnapshot snapshot = this.store.get(RUN_ID);
-			snapshot.setStatus(RunSnapshot.CANCELLED);
-			this.store.save(snapshot);
-			return null;
-		}).when(this.chatService).cancelParked(RUN_ID);
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────
@@ -251,11 +306,25 @@ class MultiCardParkResumeTest {
 		snapshot.setStatus(RunSnapshot.SUSPENDED);
 		snapshot.setContext(AiContext.empty().toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(List.of(new UserMessage("启动两个导入"))));
-		snapshot.setInFlightToolCalls(new ArrayList<>(List.of(pendings)));
+		snapshot.setInFlightToolCalls(new ArrayList<>(List.of(pendings).stream()
+			.map(MultiCardParkResumeTest::snapshotPending)
+			.toList()));
 		this.store.save(snapshot);
 		for (PendingToolCall pending : pendings) {
 			this.store.putPending(RUN_ID, pending);
 		}
+	}
+
+	private static PendingToolCall snapshotPending(PendingToolCall latest) {
+		PendingToolCall snapshot = new PendingToolCall();
+		snapshot.setToolCallId(latest.getToolCallId());
+		snapshot.setName(latest.getName());
+		snapshot.setType(latest.getType());
+		snapshot.setKind(latest.getKind());
+		snapshot.setArguments(latest.getArguments());
+		snapshot.setStatus(PendingToolCall.PENDING);
+		snapshot.setReq(latest.getReq());
+		return snapshot;
 	}
 
 	private static PendingToolCall frontendEntry(String callId, String name, String arguments, String status) {

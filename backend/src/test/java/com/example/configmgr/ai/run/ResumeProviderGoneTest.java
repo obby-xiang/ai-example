@@ -27,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -89,7 +90,7 @@ class ResumeProviderGoneTest {
 		}).when(executor).execute(any(Runnable.class));
 		this.service = new ResumeService(this.store, mock(RunRegistry.class), this.codec, this.chatService,
 				mock(SpToolCallingManager.class), executor, mock(StringRedisTemplate.class), this.properties,
-				mock(CancellationRegistry.class), mock(ToolResultLimiter.class));
+				mock(CancellationRegistry.class), new ToolResultLimiter(this.properties));
 		ReflectionTestUtils.setField(this.service, "aiConfigService", this.configService);
 		// 复核 Critical-1 之后的默认口径：刷新成功 + 行级声明也没有（= "确定不可用"）才判死
 		when(this.configService.reloadWithOutcome())
@@ -161,6 +162,63 @@ class ResumeProviderGoneTest {
 		verify(this.configService, org.mockito.Mockito.atLeastOnce()).resolveChatTarget(7L, "deepseek-flash");
 		verify(this.configService).reloadWithOutcome();
 		verify(this.configService, never()).resolveChatTarget(anyString());
+	}
+
+	@Test
+	void unavailableProviderDoesNotOverrideRejectedUserDecision() {
+		seedSnapshot(7L, "deepseek-flash");
+		seedUserDecision(PendingToolCall.REJECTED, PendingToolCall.KIND_CONFIRM);
+		stubCancelParked();
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertUserDecisionWonWithoutProviderResolution(result, PendingToolCall.REJECTED);
+	}
+
+	@Test
+	void unavailableProviderDoesNotOverrideFrontendCancellation() {
+		seedSnapshot(7L, "deepseek-flash");
+		seedUserDecision(PendingToolCall.FRONTEND_CANCELLED, PendingToolCall.KIND_FRONTEND);
+		stubCancelParked();
+
+		ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+		assertUserDecisionWonWithoutProviderResolution(result, PendingToolCall.FRONTEND_CANCELLED);
+	}
+
+	private void assertUserDecisionWonWithoutProviderResolution(ResumeService.ResumeResult result, String status) {
+		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ALREADY_CANCELLED);
+		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+		assertThat(this.store.pending(RUN_ID, "call-user-decision").getStatus()).isEqualTo(status);
+		verify(this.chatService).cancelParked(RUN_ID);
+		verify(this.chatService, never()).driveResumed(anyString(), anyString(), any(), any(), any());
+		verify(this.chatService, never()).systemPromptText(any(AiContext.class), anyBoolean());
+		verify(this.configService, never()).resolveChatTarget(any(Long.class), anyString());
+	}
+
+	private void seedUserDecision(String status, String kind) {
+		RunSnapshot snapshot = this.store.get(RUN_ID);
+		PendingToolCall pending = new PendingToolCall();
+		pending.setToolCallId("call-user-decision");
+		pending.setName(PendingToolCall.KIND_FRONTEND.equals(kind) ? "generative_form" : "start_export");
+		pending.setType("function");
+		pending.setKind(kind);
+		pending.setArguments("{}");
+		pending.setStatus(status);
+		pending.setResultText("user decision");
+		snapshot.setInFlightToolCalls(List.of(pending));
+		this.store.save(snapshot);
+		this.store.putPending(RUN_ID, pending);
+	}
+
+	private void stubCancelParked() {
+		doAnswer(invocation -> {
+			RunSnapshot snapshot = this.store.get(RUN_ID);
+			snapshot.setStatus(RunSnapshot.CANCELLED);
+			snapshot.setInFlightToolCalls(List.of());
+			this.store.save(snapshot);
+			return null;
+		}).when(this.chatService).cancelParked(RUN_ID);
 	}
 
 	// ── 装配 ────────────────────────────────────────────────────────────────

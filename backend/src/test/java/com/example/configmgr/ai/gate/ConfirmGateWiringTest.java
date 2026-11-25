@@ -7,6 +7,7 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.tool.ToolMeta;
@@ -30,6 +31,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -53,7 +55,7 @@ import static org.mockito.Mockito.when;
  * <li>四个启动类工具都被登记为 {@code KIND_CONFIRM}（确认门）；</li>
  * <li>只读/创建类工具仍是 {@code KIND_BACKEND}（直接执行，不给人添确认负担）；</li>
  * <li>确认门判为"拒绝"时，管理器<b>不会</b>去执行工具（{@code claimExecution} 未被调用），
- * 且回填给模型的正是确认门给出的"未执行 + 原因"文本。</li>
+ * 且以 {@code StreamViolationException(CANCELLED)} 终止本轮，拒绝文本不返回官方模型循环。</li>
  * </ol>
  */
 class ConfirmGateWiringTest {
@@ -95,6 +97,8 @@ class ConfirmGateWiringTest {
     void defaultScopeGuardAllows() {
         when(this.toolRegistry.matchesContext(anyString(), any(com.example.configmgr.ai.tool.AiContext.class)))
             .thenReturn(true);
+        when(this.toolRegistry.isContextMatched(anyString(), any(com.example.configmgr.ai.tool.AiContext.class)))
+            .thenReturn(true);
     }
 
     @Test
@@ -110,7 +114,7 @@ class ConfirmGateWiringTest {
         when(this.store.instanceId()).thenReturn("test-instance");
         when(this.registry.of(RUN_ID)).thenReturn(this.emitter);
 
-        // 确认门判"拒绝"：以"未执行 + 原因"回填，且绝不进入执行路径
+        // 确认门判"拒绝"：管理器边界终止本轮，且绝不进入执行路径
         when(this.gate.awaitDecision(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
             PendingToolCall pending = invocation.getArgument(1);
             pending.setStatus(PendingToolCall.REJECTED);
@@ -119,21 +123,21 @@ class ConfirmGateWiringTest {
             return pending;
         });
 
-        ToolExecutionResult result = this.manager.executeToolCalls(prompt("start_export", "{\"taskId\":7}"),
-                response("start_export", "{\"taskId\":7}"));
+        assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_export", "{\"taskId\":7}"),
+                response("start_export", "{\"taskId\":7}")))
+            .isInstanceOf(StreamViolationException.class)
+            .satisfies(ex -> assertThat(((StreamViolationException) ex).getCode())
+                .isEqualTo(StreamViolationException.CANCELLED));
 
         // ① 挂起条目带 CONFIRM 种类（外置帧里就是这么发给前端的）
         assertThat(pendingsToldToFrontend()).extracting(PendingToolCall::getKind)
                 .containsExactly(PendingToolCall.KIND_CONFIRM);
         // ② 确认门被调用（挂起而不是直接执行）
         verify(this.gate).awaitDecision(eq(RUN_ID), any(PendingToolCall.class));
-        // ③ 拒绝 → 未认领执行；回填的是统一信封，message 为原拒绝文案
+        // ③ 拒绝 → 未认领执行，也不再把拒绝文本或 toolResult 交给官方模型循环
         verify(this.store, never()).claimExecution(anyString(), anyString(), anyString());
-        ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
-        assertThat(envelope.outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
-        assertThat(envelope.ok()).isFalse();
-        assertThat(envelope.target()).containsEntry("taskId", 7);
-        assertThat(envelope.message()).isEqualTo("用户拒绝了该操作，工具未执行。拒绝原因：先不导出");
+        verify(this.emitter, never()).toolResult(any(PendingToolCall.class), org.mockito.ArgumentMatchers.anyBoolean(),
+                org.mockito.ArgumentMatchers.anyBoolean(), anyString());
     }
 
     @Test
@@ -175,7 +179,11 @@ class ConfirmGateWiringTest {
         when(this.toolRegistry.channelOf("start_import")).thenReturn(ToolMeta.Channel.BACKEND);
         when(this.toolRegistry.riskOf("start_import")).thenReturn(ToolMeta.RiskLevel.DANGER);
         when(this.store.ledgerFor(eq(RUN_ID), anyString())).thenReturn(null);
-        when(this.store.claimExecution(eq(RUN_ID), anyString(), anyString())).thenReturn(true);
+        when(this.store.tryClaimExecution(eq(RUN_ID), anyString(), anyString()))
+            .thenReturn(new RunStore.ClaimResult(RunStore.ClaimOutcome.WON, 0L, 0L));
+        when(this.store.isExecutionCompletedWithLedger(eq(RUN_ID), any(PendingToolCall.class), anyString(),
+                org.mockito.ArgumentMatchers.anyLong(), anyString(), org.mockito.ArgumentMatchers.anyBoolean()))
+            .thenReturn(true);
         // 确认门：放行（状态 APPROVED，未执行 —— 执行由循环内的认领负责）
         when(this.gate.awaitDecision(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
             PendingToolCall pending = invocation.getArgument(1);
@@ -188,12 +196,13 @@ class ConfirmGateWiringTest {
                 response("start_import", "{\"taskId\":7}"));
 
         assertThat(this.fakeStartImport.invocations.get()).as("放行后工具被真实执行").isEqualTo(1);
-        verify(this.store).claimExecution(eq(RUN_ID), anyString(), anyString());
-        verify(this.store).appendLedger(eq(RUN_ID), any(PendingToolCall.class), anyString());
+        verify(this.store).tryClaimExecution(eq(RUN_ID), anyString(), anyString());
+        verify(this.store).isExecutionCompletedWithLedger(eq(RUN_ID), any(PendingToolCall.class), anyString(),
+                org.mockito.ArgumentMatchers.anyLong(), anyString(), org.mockito.ArgumentMatchers.anyBoolean());
         ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
         assertThat(envelope.outcome()).isEqualTo(ToolOutcome.OK.wire());
         assertThat(envelope.code()).isNull();
-        assertThat(envelope.target()).containsEntry("taskId", 7);
+        assertThat(envelope.target()).containsEntry("taskId", "7");
         assertThat(envelope.message()).contains("导入作业已启动（作业 #4242）");
     }
 
@@ -212,6 +221,7 @@ class ConfirmGateWiringTest {
         when(this.gate.awaitDecision(eq(RUN_ID), any(PendingToolCall.class))).thenAnswer(invocation -> {
             PendingToolCall pending = invocation.getArgument(1);
             pending.setStatus(PendingToolCall.TIMEOUT);
+            pending.setOutcome(ToolOutcome.TIMEOUT.wire());
             pending.setReason(ToolOutcome.CODE_CONFIRM_TIMEOUT);
             pending.setExecuted(false);
             pending.setResultText("确认等待超过 120 秒，系统已自动取消该操作（工具未执行）。");
@@ -251,8 +261,11 @@ class ConfirmGateWiringTest {
             return pending;
         });
 
-        this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
-                response("start_import", "{\"taskId\":7}"));
+        assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
+                response("start_import", "{\"taskId\":7}")))
+            .isInstanceOf(StreamViolationException.class)
+            .satisfies(ex -> assertThat(((StreamViolationException) ex).getCode())
+                .isEqualTo(StreamViolationException.CANCELLED));
 
         PendingToolCall suspended = persistedSuspension();
         assertThat(suspended.getAtMs()).as("确认门不写到期锚点").isNull();
@@ -288,7 +301,7 @@ class ConfirmGateWiringTest {
     @SuppressWarnings("unchecked")
     private PendingToolCall persistedSuspension() {
         ArgumentCaptor<List<PendingToolCall>> persisted = ArgumentCaptor.forClass(List.class);
-        verify(this.store).saveSuspended(eq(RUN_ID), nullable(String.class), persisted.capture(),
+        verify(this.store).saveSuspended(eq(RUN_ID), nullable(String.class), nullable(String.class), persisted.capture(),
                 any(List.class), any(MessageJsonCodec.class), any());
         return persisted.getValue().get(0);
     }

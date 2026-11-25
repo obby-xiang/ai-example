@@ -1277,9 +1277,9 @@ public class ResumeService {
         if (result != null) return result;
         result = runningResumeResult(state, forceTakeover);
         if (result != null) return result;
-        result = providerResumeResult(state);
-        if (result != null) return result;
         result = userDecisionResumeResult(state);
+        if (result != null) return result;
+        result = providerResumeResult(state);
         if (result != null) return result;
         result = unresolvedResumeResult(state);
         if (result != null) return result;

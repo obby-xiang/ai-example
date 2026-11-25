@@ -10,6 +10,7 @@ import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolCategory;
@@ -54,6 +55,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -256,29 +258,28 @@ class ConditionGateFailClosedTest {
 
 	@Test
 	void mixedBatchRejectsConfirmStepAndKeepsTheStartExportCard() {
-		this.taskState.set(task("QUERY_COND", null));
-		seedSnapshot(this.store, "QUERY_COND");
+		try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+				com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
+			this.taskState.set(task("QUERY_COND", null));
+			seedSnapshot(this.store, "QUERY_COND");
 
-		ToolExecutionResult result = runBatch(this.store,
-				new AssistantMessage.ToolCall("call-confirm", "function", "confirm_step", "{}"),
-				new AssistantMessage.ToolCall("call-start", "function", "start_export",
-						"{\"taskId\":" + TASK_ID + "}"));
+			assertThatThrownBy(() -> runBatch(this.store,
+					new AssistantMessage.ToolCall("call-confirm", "function", "confirm_step", "{}"),
+					new AssistantMessage.ToolCall("call-start", "function", "start_export",
+							"{\"taskId\":" + TASK_ID + "}")))
+				.isInstanceOf(StreamViolationException.class)
+				.satisfies(ex -> assertThat(((StreamViolationException) ex).getCode())
+					.isEqualTo(StreamViolationException.CANCELLED));
+			assertThat(this.store.pending(RUN_ID, HOST_FORM_ID)).as("混批不得先挂条件表再改").isNull();
 
-		ToolResultEnvelope confirm = envelopeOf(result, "call-confirm");
-		assertThat(confirm.outcome()).as("混批时 confirm_step 必须零副作用拒绝").isEqualTo(ToolOutcome.REJECTED.wire());
-		assertThat(confirm.code()).isEqualTo(ErrorCodes.TOOL_EXECUTION_FAILED);
-		assertThat(confirm.message())
-			.as("必须给出可执行的纠正：先单独调用 confirm_step")
-			.contains("先单独调用 confirm_step");
-		assertThat(this.store.pending(RUN_ID, HOST_FORM_ID)).as("混批不得先挂条件表再改").isNull();
+			@SuppressWarnings("unchecked")
+			ArgumentCaptor<List<PendingToolCall>> captor = ArgumentCaptor.forClass(List.class);
+			verify(this.emitter).suspended(captor.capture(), anyString(), anyString(), anyString());
+			assertThat(captor.getValue()).extracting(PendingToolCall::getName).contains("start_export");
 
-		@SuppressWarnings("unchecked")
-		ArgumentCaptor<List<PendingToolCall>> captor = ArgumentCaptor.forClass(List.class);
-		verify(this.emitter).suspended(captor.capture(), anyString(), anyString(), anyString());
-		assertThat(captor.getValue()).extracting(PendingToolCall::getName).contains("start_export");
-
-		verify(this.gate).awaitDecision(eq(RUN_ID), any(PendingToolCall.class));
-		assertThat(this.taskState.get().getCurrentStep()).isEqualTo("QUERY_COND");
+			verify(this.gate).awaitDecision(eq(RUN_ID), any(PendingToolCall.class));
+			assertThat(this.taskState.get().getCurrentStep()).isEqualTo("QUERY_COND");
+		}
 	}
 
 	// ── 桩与辅助 ────────────────────────────────────────────────────────────
@@ -318,6 +319,8 @@ class ConditionGateFailClosedTest {
 	private void seedSnapshot(InMemoryRunStore runStore, String step) {
 		AiContext context = AiContext.of("export", "EXPORT", step, TASK_ID, "ACTIVE", Map.of());
 		RunSnapshot snapshot = runStore.seedRun(RUN_ID, SESSION_ID);
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
 		snapshot.setStatus(RunSnapshot.RUNNING);
 		snapshot.setContext(context.toMap());
 		snapshot.setMessageJson(this.codec.serializeAll(

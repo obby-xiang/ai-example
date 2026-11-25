@@ -67,8 +67,8 @@ import java.util.concurrent.atomic.AtomicReference;
  * <ul>
  * <li><b>放行</b>：{@code POST /api/ai/confirm {approved:true}} → Redis 里
  * {@code status=APPROVED, executed=false} → 唤醒循环内的等待 → 由循环执行工具并记台账；</li>
- * <li><b>拒绝</b>：{@code status=REJECTED}，结果文本回填"用户拒绝 + 原因"，<b>不执行</b>，
- * 官方循环照常继续（模型如实解释）；</li>
+ * <li><b>拒绝</b>：{@code status=REJECTED}，保留"用户拒绝 + 原因"作为决策事实，<b>不执行</b>；
+ * 管理器结果边界以 CANCELLED 终止当前 run，拒绝文本不交给官方模型循环；</li>
  * <li><b>取消</b>：整轮被取消（{@code ai:cancel:{<tenantId>:<userId>:run:<runId>}}）→ {@code status=CANCELLED}，不执行。</li>
  * </ul>
  *

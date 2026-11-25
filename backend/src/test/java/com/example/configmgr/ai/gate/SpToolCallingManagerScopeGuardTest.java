@@ -8,6 +8,7 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolMeta;
@@ -32,6 +33,7 @@ import java.util.Map;
 import java.util.stream.IntStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -154,10 +156,13 @@ class SpToolCallingManagerScopeGuardTest {
             return pending;
         });
 
-        this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
-                response("start_import", "{\"taskId\":7}"));
+        assertThatThrownBy(() -> this.manager.executeToolCalls(prompt("start_import", "{\"taskId\":7}"),
+                response("start_import", "{\"taskId\":7}")))
+            .isInstanceOf(StreamViolationException.class)
+            .satisfies(ex -> assertThat(((StreamViolationException) ex).getCode())
+                .isEqualTo(StreamViolationException.CANCELLED));
 
-        // 上下文匹配 ⇒ 仍走确认门（防线③只拦越权，不改变既有 HITL 语义）
+        // 上下文匹配 ⇒ 仍走确认门（防线③只拦越权，用户拒绝则由管理器终止本轮）
         verify(this.gate).awaitDecision(eq(RUN_ID), any(PendingToolCall.class));
     }
 

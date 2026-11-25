@@ -4,26 +4,46 @@ import com.example.configmgr.ai.run.TestRunRegistryFactory;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.run.RunRegistry;
+import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.tool.AiContext;
+import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolResultLimiter;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.model.tool.ToolExecutionResult;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 /**
@@ -49,20 +69,24 @@ class ConfirmGateResolvedSkipTest {
 
 	private static final String RUN_ID = "run-resolved-skip";
 
-	private final InMemoryRunStore store = new InMemoryRunStore();
+	private final RequestContextUtils.SafeCloseable identity = RequestContextUtils.useContext(1L, 101L);
+
+	private final InMemoryRunStore store = spy(new InMemoryRunStore());
 
 	private final ObjectMapper mapper = new ObjectMapper();
 
-	/** 真实注册表 + 真实写出器（{@code properties == null} ⇒ 同步直执，帧序确定）。 */
-	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null);
+	private final AiProperties properties = new AiProperties();
 
-	private final SseChatEmitter out = this.registry.of(RUN_ID);
+	/** 真实注册表 + 真实写出器（{@code properties == null} ⇒ 同步直执，帧序确定）。 */
+	private final SseChatEmitter out = TestRunRegistryFactory.create(this.store, this.mapper, null).of(RUN_ID);
+
+	private final RunRegistry registry = TestRunRegistryFactory.create(this.store, this.mapper, null, this.out);
 
 	private final CancellationRegistry cancellations = mock(CancellationRegistry.class);
 
-	private final ToolActivityBeacon beacon = new ToolActivityBeacon();
+	private final ToolActivityBeacon beacon = mock(ToolActivityBeacon.class);
 
-	private final ConfirmGate gate = new ConfirmGate(this.store, this.registry, new AiProperties(), this.cancellations,
+	private final ConfirmGate gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations,
 			this.beacon, List.of());
 
 	@BeforeEach
@@ -70,7 +94,15 @@ class ConfirmGateResolvedSkipTest {
 		when(this.cancellations.cancelState(RUN_ID)).thenReturn(com.example.configmgr.ai.run.CancellationRegistry.CancelState.NOT_CANCELLED);
 		when(this.cancellations.onCancel(anyString(), any())).thenAnswer(invocation -> (AutoCloseable) () -> {
 		});
-		this.store.seedRun(RUN_ID, "sess-1");
+		RunSnapshot snapshot = this.store.seedRun(RUN_ID, "sess-1");
+		snapshot.setTenantId(1L);
+		snapshot.setUserId(101L);
+		this.store.save(snapshot);
+	}
+
+	@AfterEach
+	void closeIdentity() {
+		this.identity.close();
 	}
 
 	@Test
@@ -107,15 +139,34 @@ class ConfirmGateResolvedSkipTest {
 	}
 
 	@Test
-	void rejectedEntryAtAwaitKeepsTheExistingRejectionTextForTheModel() {
-		this.store.putPending(RUN_ID, decided("call-r", PendingToolCall.KIND_CONFIRM, PendingToolCall.REJECTED,
-				"用户拒绝了该操作，工具未执行。"));
+	void earlyRejectedConfirmThrowsCancelledInsteadOfReturningTextToTheModel() {
+		PendingToolCall rejected = decided("call-r", PendingToolCall.KIND_CONFIRM, PendingToolCall.REJECTED,
+				"用户拒绝了该操作，工具未执行。");
+		decideAfterSuspended(rejected);
 
-		PendingToolCall resolved = this.gate.awaitDecision(RUN_ID, pending("call-r", PendingToolCall.KIND_CONFIRM));
+		assertThatThrownBy(() -> execute(manager(), response("start_export")))
+			.isInstanceOf(StreamViolationException.class)
+			.satisfies(ex -> assertThat(((StreamViolationException) ex).getCode())
+				.isEqualTo(StreamViolationException.CANCELLED));
+		assertThat(this.store.pending(RUN_ID, "call-r").getStatus()).isEqualTo(PendingToolCall.REJECTED);
+		assertThat(this.store.pending(RUN_ID, "call-r").getResultText()).isEqualTo("用户拒绝了该操作，工具未执行。");
+		assertThat(this.store.archivedTypes(RUN_ID)).doesNotContain("confirm_request", "tool_result");
+	}
 
-		assertThat(resolved.getStatus()).isEqualTo(PendingToolCall.REJECTED);
-		assertThat(resolved.getResultText()).isEqualTo("用户拒绝了该操作，工具未执行。");
-		assertThat(resolved.isExecuted()).isFalse();
+	@Test
+	void earlyCancelledFrontendThrowsCancelledInsteadOfReturningTextToTheModel() {
+		PendingToolCall cancelled = decided("call-f", PendingToolCall.KIND_FRONTEND, PendingToolCall.FRONTEND_CANCELLED,
+				"用户取消，未获得数据");
+		cancelled.setOutcome(ToolOutcome.CANCELLED.wire());
+		decideAfterSuspended(cancelled);
+
+		assertThatThrownBy(() -> execute(manager(), response("generative_form")))
+			.isInstanceOf(StreamViolationException.class)
+			.satisfies(ex -> assertThat(((StreamViolationException) ex).getCode())
+				.isEqualTo(StreamViolationException.CANCELLED));
+		assertThat(this.store.pending(RUN_ID, "call-f").getStatus()).isEqualTo(PendingToolCall.FRONTEND_CANCELLED);
+		assertThat(this.store.pending(RUN_ID, "call-f").getResultText()).isEqualTo("用户取消，未获得数据");
+		assertThat(this.store.archivedTypes(RUN_ID)).doesNotContain("frontend_tool_request", "frontend_tool_result");
 	}
 
 	// ── M-1：读时 PENDING、置位写前被另一实例决策（跨进程窗口） ─────────────────
@@ -151,6 +202,48 @@ class ConfirmGateResolvedSkipTest {
 	}
 
 	// ── 辅助 ────────────────────────────────────────────────────────────────
+
+	private void decideAfterSuspended(PendingToolCall decided) {
+		doAnswer(invocation -> {
+			invocation.callRealMethod();
+			this.store.putPending(RUN_ID, decided);
+			return null;
+		}).when(this.store).saveSuspended(eq(RUN_ID), any(), any(), any(), any(), any(), any());
+	}
+
+	private SpToolCallingManager manager() {
+		ToolRegistry tools = mock(ToolRegistry.class);
+		when(tools.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
+		when(tools.isContextMatched(anyString(), any(AiContext.class))).thenReturn(true);
+		when(tools.channelOf("start_export")).thenReturn(ToolMeta.Channel.BACKEND);
+		when(tools.riskOf("start_export")).thenReturn(ToolMeta.RiskLevel.DANGER);
+		when(tools.channelOf("generative_form")).thenReturn(ToolMeta.Channel.FRONTEND);
+		return new SpToolCallingManager(this.store, this.registry, this.gate, tools, mock(MessageJsonCodec.class),
+				this.beacon, this.cancellations, new ToolResultLimiter(this.properties), List.of());
+	}
+
+	private static ToolExecutionResult execute(SpToolCallingManager manager, ChatResponse response) {
+		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+			return manager.executeToolCalls(prompt(), response);
+		}
+	}
+
+	private static Prompt prompt() {
+		ToolCallingChatOptions options = ToolCallingChatOptions.builder()
+			.toolContext(Map.of("runId", RUN_ID))
+			.build();
+		return new Prompt(List.of(new UserMessage("hi")), options);
+	}
+
+	private static ChatResponse response(String tool) {
+		String callId = "start_export".equals(tool) ? "call-r" : "call-f";
+		String arguments = "start_export".equals(tool) ? "{\"taskId\":7}"
+				: "{\"form\":{\"purpose\":\"GENERAL_CLARIFY\",\"scenario\":\"CLARIFY\",\"fields\":[]}}";
+		AssistantMessage assistant = AssistantMessage.builder()
+			.toolCalls(List.of(new AssistantMessage.ToolCall(callId, "function", tool, arguments)))
+			.build();
+		return new ChatResponse(List.of(new Generation(assistant)));
+	}
 
 	/** 已决条目：状态、结局文本与 resolvedAtMs 齐备（与 {@code submitDecision} 落库形态同形）。 */
 	private static PendingToolCall decided(String toolCallId, String kind, String status, String resultText) {

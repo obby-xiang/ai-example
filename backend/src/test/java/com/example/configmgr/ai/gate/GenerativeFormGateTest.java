@@ -10,6 +10,7 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolMeta;
@@ -34,6 +35,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -125,6 +127,7 @@ class GenerativeFormGateTest {
 		when(this.store.pendingKey(RUN_ID)).thenReturn("ai:pending:" + RUN_ID);
 		when(this.store.instanceId()).thenReturn("test-instance");
 		when(this.toolRegistry.matchesContext(anyString(), any(AiContext.class))).thenReturn(true);
+		when(this.toolRegistry.isContextMatched(anyString(), any(AiContext.class))).thenReturn(true);
 		when(this.toolRegistry.channelOf("generative_form")).thenReturn(ToolMeta.Channel.FRONTEND);
 		when(this.toolRegistry.channelOf("navigate_to")).thenReturn(ToolMeta.Channel.FRONTEND);
 	}
@@ -151,6 +154,26 @@ class GenerativeFormGateTest {
 			ToolResultEnvelope envelope = ToolResultEnvelope.fromJson(toolText(result));
 			assertThat(envelope.outcome()).isEqualTo(ToolOutcome.OK.wire());
 			assertThat(envelope.message()).isEqualTo("{\"keyword\":\"CNY\"}");
+			verify(GenerativeFormGateTest.this.gateForSuspension).awaitFrontendResult(eq(RUN_ID),
+					any(PendingToolCall.class));
+		}
+
+		@Test
+		void cancelledResultThrowsCancelledInsteadOfReturningTextToTheModel() {
+			when(GenerativeFormGateTest.this.gateForSuspension.awaitFrontendResult(eq(RUN_ID),
+					any(PendingToolCall.class))).thenAnswer(invocation -> {
+						PendingToolCall pending = invocation.getArgument(1);
+						pending.setStatus(PendingToolCall.FRONTEND_CANCELLED);
+						pending.setOutcome(ToolOutcome.CANCELLED.wire());
+						pending.setResultText("用户取消，未获得数据");
+						return pending;
+					});
+
+			assertThatThrownBy(() -> GenerativeFormGateTest.this.manager.executeToolCalls(
+					prompt(), response("generative_form", SUSPEND_ARGS)))
+				.isInstanceOf(StreamViolationException.class)
+				.satisfies(ex -> assertThat(((StreamViolationException) ex).getCode())
+					.isEqualTo(StreamViolationException.CANCELLED));
 			verify(GenerativeFormGateTest.this.gateForSuspension).awaitFrontendResult(eq(RUN_ID),
 					any(PendingToolCall.class));
 		}

@@ -8446,6 +8446,67 @@
           "reason": "七个用户决策方法先取得预期RED，REJECTED_ARGUMENTS对照基线GREEN；最终八个规格方法与四个批准/未决/直接取消相邻方法均逐方法exit 0，五个生产文件IDEA Reformat ok，GREEN实际编译364源且最终compile和IDEA定点编译成功；按任务禁令未运行测试类/套件、真实模型或服务，完整命令与中间夹具修正记录于仓外报告。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:ffecfcf61e7db4c3657f8260cf0b9e7e84558a7c5ba71d9796272a18b7f45f0c",
+      "status": "reviewed",
+      "reason": "对本轮最终暂存的三个生产文件逐hunk复核：SpToolCallingManager在awaitFrontendResult返回后和awaitConfirm非APPROVED返回前共用精确用户决策异常边界，REJECTED_ARGUMENTS/TIMEOUT/APPROVED保持原路径；ResumeService把用户决策准入前移到provider检查之前；ConfirmGate拒绝后官方循环继续的旧注释已改为CANCELLED终局。",
+      "reviewedAt": "2026-11-26T02:11:03+08:00",
+      "reviewer": "Kimi Code续修上下文静态逐hunk自审（按任务要求未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "非park和park前提前已决的FRONTEND_CANCELLED/REJECTED也在SpToolCallingManager结果返回边界统一抛出StreamViolationException(CANCELLED)，不再把取消/拒绝文本交给官方模型循环；恢复准入的用户决策优先于provider不可用判定。",
+          "reason": "独立审查证明ConfirmGate.await可在park前直接返回已决条目，单补ResumeService仍漏掉非park和提前已决路径；providerResumeResult抢先也会错误覆盖用户终局。",
+          "impact": "覆盖实时官方循环、park前已决与恢复三条路径；APPROVED、REJECTED_ARGUMENTS、TIMEOUT和正常前端结果保持原语义，不新增工具专用分支、模型请求或协议字段。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/ConfirmGate.java",
+          "status": "checked",
+          "reason": "类级拒绝结局注释由官方循环继续改为管理器边界CANCELLED并保留决策事实，未改变确认门等待、决策落库或回执帧实现。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "两个结果返回边界共用throwIfUserDecision，仅FRONTEND_CANCELLED/REJECTED抛出现有CANCELLED异常；APPROVED仍执行，其它状态仍生成原有工具结果。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java",
+          "status": "checked",
+          "reason": "checkResumeAdmission在取消/终态/活跃运行检查后先执行userDecisionResumeResult再执行providerResumeResult，provider不可用不再覆盖用户取消或拒绝。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用既有StreamViolationException(CANCELLED)、cancelTerminal和ResumeService用户决策入口，没有新增或升级依赖，也未增加工具类型分支。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "throwIfUserDecision低于50行且仅一个状态组合判断，两个调用点位于契约指定边界；控制块保留大括号，未新增集合、JSON字段、import或Lombok结构。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "异常使用现有CANCELLED类型和英文技术消息，由既有cancelTerminal收尾；不吞异常、不把拒绝文本伪装成成功结果，也未新增日志或敏感输出。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "用户取消或拒绝后不再出现后续同类卡或模型收尾文本，真实取消仍补必要的取消终帧；未修改前端组件、文案或样式。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "实时、提前已决和恢复路径统一用户终局，provider不可用不再抢先失败；真实cancelParked验证inFlight清空、其它PENDING收敛和原决策保留，未新增Redis键、数据库访问或模型调用。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批只比较工具状态并调整控制流，不处理文本、字节流、SSE分片、代理对或截断。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "六个边界方法先取得预期RED，真实多卡与系统对照先确认基线后复验；最终28个规格及相邻方法均逐方法exit 0，三个生产文件IDEA Reformat ok，GREEN实际编译364源且最终compile和IDEA定点编译成功；未运行测试类/套件、真实模型或服务，所有命令和夹具修正追加到仓外报告。"
+        }
+      }
     }
   ]
 }

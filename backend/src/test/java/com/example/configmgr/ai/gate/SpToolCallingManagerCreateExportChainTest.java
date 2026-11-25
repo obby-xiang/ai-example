@@ -8,6 +8,7 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.RunStore;
 import com.example.configmgr.ai.run.SseChatEmitter;
+import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolCategory;
@@ -48,6 +49,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -200,6 +202,8 @@ class SpToolCallingManagerCreateExportChainTest {
 
         this.manager = new SpToolCallingManager(this.store, this.registry, this.gate, this.toolRegistry, this.codec,
                 this.beacon, this.cancellations, this.limiter, List.of());
+        this.manager.setCreateTaskReferenceResolver(new CreateTaskReferenceResolver(List::of,
+                new com.fasterxml.jackson.databind.ObjectMapper()));
         this.manager.setContextRefresher(new RunContextRefresher(this.taskService));
     }
 
@@ -224,11 +228,10 @@ class SpToolCallingManagerCreateExportChainTest {
         this.taskState.set(task(7L, Task.TaskType.EXPORT, "EXPORT", Task.TaskStatus.ACTIVE));
         this.decisions.add(PendingToolCall.REJECTED);
 
-        ToolExecutionResult rejectedStart = run(optionsFor(exportReady),
-                call("s1", "start_export", "{\"taskId\":7}"));
-
-        assertThat(envelopeOf(rejectedStart, "s1").outcome()).isEqualTo(ToolOutcome.REJECTED.wire());
-        assertThat(envelopeOf(rejectedStart, "s1").message()).contains("用户拒绝了该操作");
+        assertThatThrownBy(() -> run(optionsFor(exportReady), call("s1", "start_export", "{\"taskId\":7}")))
+            .isInstanceOf(StreamViolationException.class)
+            .satisfies(ex -> assertThat(((StreamViolationException) ex).getCode())
+                .isEqualTo(StreamViolationException.CANCELLED));
         // 拒绝 = 没走前端、没执行；确认门确实被问到（不是静默放行）
         assertThat(this.frontendNames).isEmpty();
         assertThat(this.decided).hasSize(1);
@@ -248,7 +251,7 @@ class SpToolCallingManagerCreateExportChainTest {
         assertThat(definitionNames(this.manager.resolveToolDefinitions(boundary))).contains("create_task");
 
         ToolExecutionResult created = run(boundary,
-                call("c1", "create_task", "{\"type\":\"EXPORT\",\"title\":\"十月导出\"}"));
+                call("c1", "create_task", "{\"type\":\"EXPORT\",\"title\":\"十月导出\",\"defCodes\":[]}"));
 
         singleResponseOf(created, "c1");
         assertThat(envelopeOf(created, "c1").outcome()).isEqualTo(ToolOutcome.OK.wire());
