@@ -21,11 +21,15 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
+import java.text.BreakIterator;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @Slf4j
@@ -115,20 +119,45 @@ public class CreateTaskDetailsForm extends HostForm {
         Map<String, Object> field = new LinkedHashMap<>();
         field.put("key", fieldKey(reference));
         field.put("label", fieldLabel(reference, english));
-        field.put("type", enumValue ? "enum" : "text");
+        field.put("type", reference.isArray() ? "multi_select" : enumValue ? "enum" : "text");
         field.put("required", true);
         if (enumValue) {
             field.put("options", reference.options().stream().map(CreateTaskDetailsForm::option).toList());
+        }
+        if (reference.isArray()) {
+            field.put("defaultValue", reference.resolvedValues());
         }
         return field;
     }
 
     private static String fieldLabel(CreateTaskReferenceResolver.UnresolvedReference reference, boolean english) {
         int position = Math.max(0, reference.fieldIndex()) + 1;
-        return switch (reference.kind()) {
+        String base = switch (reference.kind()) {
             case DEFINITION -> (english ? "Configuration " : "配置项 ") + (reference.definitionIndex() + 1);
             case FIELD -> (english ? "Field " : "字段 ") + position;
             case ENUM_VALUE -> (english ? "Value " : "选项值 ") + position;
+        };
+        String original = reference.reference() == null ? "" : ": " + abbreviate(reference.reference(), 40);
+        return abbreviate(base + original + " — " + reasonLabel(reference.reason(), english),
+                GenerativeFormRules.MAX_LABEL_CHARS);
+    }
+
+    private static String abbreviate(String text, int maxLength) {
+        if (text.length() <= maxLength) {
+            return text;
+        }
+        BreakIterator boundaries = BreakIterator.getCharacterInstance(Locale.ROOT);
+        boundaries.setText(text);
+        return text.substring(0, boundaries.preceding(maxLength - 2)) + "...";
+    }
+
+    private static String reasonLabel(CreateTaskReferenceResolver.Reason reason, boolean english) {
+        return switch (reason) {
+            case NOT_FOUND -> english ? "No matching option" : "未找到匹配项";
+            case AMBIGUOUS -> english ? "Multiple matches; choose a unique value" : "存在多个匹配项，请明确取值";
+            case BLANK -> english ? "Value is blank" : "引用为空";
+            case NO_UNIQUE_OWNER -> english ? "Choose a configuration first" : "请先明确所属配置项";
+            case NO_UNIQUE_KEY -> english ? "No unique key field" : "没有唯一主键字段";
         };
     }
 
@@ -211,7 +240,7 @@ public class CreateTaskDetailsForm extends HostForm {
                 throw new IllegalArgumentException("Invalid create task details receipt");
             }
             for (JsonNode field : fields) {
-                mergeField(root, field.path("key").asText(), values);
+                mergeField(root, field, values);
             }
             return JSON.writeValueAsString(root);
         }
@@ -220,22 +249,66 @@ public class CreateTaskDetailsForm extends HostForm {
         }
     }
 
-    private static void mergeField(ObjectNode root, String key, JsonNode values) {
+    private static void mergeField(ObjectNode root, JsonNode formField, JsonNode values) {
+        String key = formField.path("key").asText();
         JsonNode value = values.get(key);
+        if (key.startsWith("definition_")) {
+            mergeDefinition(root, key, value);
+            return;
+        }
+        if ("multi_select".equals(formField.path("type").asText())) {
+            mergeEnumArray(root, key, formField.path("defaultValue"), value);
+            return;
+        }
         if (value == null || !value.isTextual() || StringUtils.isBlank(value.asText())) {
             throw new IllegalArgumentException("Missing textual create task detail");
         }
-        if (key.startsWith("definition_")) {
-            ArrayNode definitions = (ArrayNode) root.path("defCodes");
-            int index = index(key.substring("definition_".length()));
-            if (index >= definitions.size()) {
-                throw new IllegalArgumentException("Definition index out of bounds");
-            }
-            definitions.set(index, value);
-            return;
-        }
         ConditionField target = conditionField(root, key);
         target.field().put(target.property(), value.asText());
+    }
+
+    private static void mergeDefinition(ObjectNode root, String key, JsonNode value) {
+        if (value == null || !value.isTextual() || StringUtils.isBlank(value.asText())) {
+            throw new IllegalArgumentException("Missing textual create task detail");
+        }
+        ArrayNode definitions = (ArrayNode) root.path("defCodes");
+        int index = index(key.substring("definition_".length()));
+        if (index == 0 && definitions.isEmpty()) {
+            definitions.add(value);
+            return;
+        }
+        if (index >= definitions.size()) {
+            throw new IllegalArgumentException("Definition index out of bounds");
+        }
+        definitions.set(index, value);
+    }
+
+    private static void mergeEnumArray(ObjectNode root, String key, JsonNode defaults, JsonNode value) {
+        if (value == null || !value.isArray() || value.isEmpty()) {
+            throw new IllegalArgumentException("Missing create task enum array");
+        }
+        ConditionField target = conditionField(root, key);
+        if (!"value".equals(target.property()) || !target.field().path("value").isArray()) {
+            throw new IllegalArgumentException("Enum array target mismatch");
+        }
+        Set<String> merged = new LinkedHashSet<>();
+        appendArrayValues(merged, defaults);
+        appendArrayValues(merged, value);
+        ArrayNode array = JSON.createArrayNode();
+        merged.forEach(array::add);
+        target.field().set("value", array);
+    }
+
+    private static void appendArrayValues(Set<String> target, JsonNode values) {
+        if (values == null || !values.isArray()) {
+            throw new IllegalArgumentException("Create task enum values must be an array");
+        }
+        for (JsonNode value : values) {
+            if (!value.isTextual() || StringUtils.isBlank(value.asText())) {
+                throw new IllegalArgumentException("Create task enum values must be non-blank strings");
+            }
+            target.add(value.asText());
+        }
     }
 
     private static ConditionField conditionField(ObjectNode root, String key) {

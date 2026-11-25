@@ -163,3 +163,12 @@
 - `FieldCondition.fieldCode` 的嵌套模型可见 `@ToolParam` 已补齐作用域：其他工具保持字段编码语义且不接受标签或 `null`；仅 `create_task` 还可传精确字段标签，字段未知时传 `null` 由宿主解析或在创建前收集。未把其他工具的字段语义改为标签/`null` 引用。
 - 新增 `FlowTypeConditionPromptContractTest#createTaskFieldReferenceSemanticsStayScopedInNestedDescription`，直接检查 canonical 构造器参数上的真实注解描述；修正反射读取位置后取得旧文案 `字段编码，例如 code` 的预期 RED，实施后为 GREEN。直接受影响的 `createSlotRulesStaySynchronizedAcrossYamlAndAnnotation` 也单独复验 GREEN。
 - 启动后的实际版本与 WARN/异常日志门禁仍为 `NOT_RUN`，真实模型/浏览器复测仍为 `NOT_RUN`；方法级测试不构成这些门禁的完成证据。
+
+## Final fix wave 实施记录（2026-11-25）
+
+- 枚举 `IN` 数组现按元素执行精确优先、唯一大小写安全匹配并保留数组形状；任一元素未决时，整个值以权威 `multi_select` 收集，已解析元素作为默认值且合并不得丢失。非 `IN` 操作符未新增数组解析，标量枚举行为保持不变。
+- 零配置但有字段时，未决结果包含可插入 `defCodes[0]` 的配置缺口和同卡字段缺口；多配置但有字段时直接失败关闭，遵循非空条件只允许一个配置的既有契约。
+- 未决原因以有界 `Reason` 枚举区分零命中、多命中、空白、无唯一所属配置和无唯一主键；表单在原引用存在时展示有界原文，并按 `ReplyLanguage` 提供中英文原因，截断不拆 Unicode 代理对。目录失败仍为 `FAILED`，不产生纠正卡。
+- 终审要求的三处注释已同步；未改无关注释。
+- 验证仅限本波独立方法级测试：15 个行为 RED 后，23 个新增/受影响/相邻方法逐个 GREEN；IDEA Reformat 覆盖五个生产文件，本波实际后端编译 364 个源文件成功，最终 compile 确认产物最新。详见 `final-fix-report.md`。
+- 启动/运行日志和真实模型验收仍为 `NOT_RUN`，不得视为已修复或已完成；无前端变更，前端构建 `NOT_RUN`。

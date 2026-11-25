@@ -71,7 +71,7 @@ public class CreateTaskReferenceResolver {
         for (int index = 0; index < array.size(); index++) {
             JsonNode referenceNode = array.get(index);
             if (referenceNode.isNull()) {
-                unresolved.add(new UnresolvedReference(Kind.DEFINITION, index, -1, null, List.of()));
+                unresolved.add(unresolved(Kind.DEFINITION, index, -1, null, List.of(), Reason.BLANK));
                 continue;
             }
             if (!referenceNode.isTextual()) {
@@ -86,7 +86,8 @@ public class CreateTaskReferenceResolver {
                 resolved.add(match);
             }
             else {
-                unresolved.add(new UnresolvedReference(Kind.DEFINITION, index, -1, reference, List.of()));
+                unresolved.add(unresolved(Kind.DEFINITION, index, -1, reference, List.of(),
+                        matchReason(reference, matches.size())));
             }
         }
         return resolved;
@@ -116,9 +117,13 @@ public class CreateTaskReferenceResolver {
         if (fieldArray.isEmpty()) {
             return;
         }
-        if (definitions.size() != 1) {
+        if (definitions.isEmpty()) {
+            unresolved.add(unresolved(Kind.DEFINITION, 0, -1, null, List.of(), Reason.NO_UNIQUE_OWNER));
             addFieldsWithoutUniqueDefinition(fieldArray, unresolved);
             return;
+        }
+        if (definitions.size() > 1) {
+            throw new IllegalArgumentException("non-empty conditions require exactly one valid defCode");
         }
         SlotDefinition definition = definitions.getFirst();
         for (int index = 0; index < fieldArray.size(); index++) {
@@ -139,7 +144,7 @@ public class CreateTaskReferenceResolver {
                 throw new IllegalArgumentException("fieldCode must be a string or null");
             }
             String reference = referenceNode.isNull() ? null : referenceNode.asText();
-            unresolved.add(new UnresolvedReference(Kind.FIELD, -1, index, reference, List.of()));
+            unresolved.add(unresolved(Kind.FIELD, 0, index, reference, List.of(), Reason.NO_UNIQUE_OWNER));
         }
     }
 
@@ -153,7 +158,7 @@ public class CreateTaskReferenceResolver {
                 resolveEnumValue(field, key.get(), fieldIndex, unresolved);
             }
             else {
-                unresolved.add(unresolvedField(fieldIndex, null));
+                unresolved.add(unresolvedField(fieldIndex, null, Reason.NO_UNIQUE_KEY));
             }
             return;
         }
@@ -164,7 +169,7 @@ public class CreateTaskReferenceResolver {
         List<SlotField> matches = StringUtils.isBlank(reference) ? List.of()
                 : definition.fields().stream().filter(candidate -> isFieldMatch(reference, candidate)).toList();
         if (matches.size() != 1) {
-            unresolved.add(unresolvedField(fieldIndex, reference));
+            unresolved.add(unresolvedField(fieldIndex, reference, matchReason(reference, matches.size())));
             return;
         }
         SlotField match = matches.getFirst();
@@ -186,21 +191,70 @@ public class CreateTaskReferenceResolver {
         if (value == null || value.isNull()) {
             return;
         }
-        String reference = value.asText();
-        List<String> exact = definition.optionValues().stream().filter(reference::equals).toList();
-        List<String> matches = exact.isEmpty()
-                ? definition.optionValues().stream().filter(option -> StringUtils.equalsIgnoreCase(reference, option)).toList()
-                : exact;
+        if (value.isArray() && "IN".equals(field.path("operator").asText())) {
+            resolveEnumArray(field, (ArrayNode) value, definition, fieldIndex, unresolved);
+            return;
+        }
+        resolveScalarEnum(field, value.asText(), definition, fieldIndex, unresolved);
+    }
+
+    private void resolveScalarEnum(ObjectNode field, String reference, SlotField definition, int fieldIndex,
+                                   List<UnresolvedReference> unresolved) {
+        List<String> matches = optionMatches(reference, definition.optionValues());
         if (matches.size() == 1) {
             field.put("value", matches.getFirst());
             return;
         }
-        unresolved.add(new UnresolvedReference(Kind.ENUM_VALUE, 0, fieldIndex, reference,
-                definition.optionValues()));
+        unresolved.add(unresolved(Kind.ENUM_VALUE, 0, fieldIndex, reference, definition.optionValues(),
+                matchReason(reference, matches.size())));
     }
 
-    private static UnresolvedReference unresolvedField(int fieldIndex, String reference) {
-        return new UnresolvedReference(Kind.FIELD, 0, fieldIndex, reference, List.of());
+    private void resolveEnumArray(ObjectNode field, ArrayNode values, SlotField definition, int fieldIndex,
+                                  List<UnresolvedReference> unresolved) {
+        String original = values.toString();
+        List<String> resolvedValues = new ArrayList<>();
+        Reason reason = null;
+        for (int index = 0; index < values.size(); index++) {
+            JsonNode value = values.get(index);
+            if (!value.isTextual()) {
+                throw new IllegalArgumentException("IN enum values must be strings");
+            }
+            List<String> matches = optionMatches(value.asText(), definition.optionValues());
+            if (matches.size() == 1) {
+                values.set(index, this.mapper.getNodeFactory().textNode(matches.getFirst()));
+                resolvedValues.add(matches.getFirst());
+            }
+            else if (reason == null) {
+                reason = matchReason(value.asText(), matches.size());
+            }
+        }
+        if (reason == null) {
+            return;
+        }
+        unresolved.add(new UnresolvedReference(Kind.ENUM_VALUE, 0, fieldIndex, original,
+                definition.optionValues(), reason, true, resolvedValues.stream().distinct().toList()));
+    }
+
+    private static List<String> optionMatches(String reference, List<String> options) {
+        List<String> exact = options.stream().filter(reference::equals).toList();
+        return exact.isEmpty() ? options.stream().filter(option -> StringUtils.equalsIgnoreCase(reference, option)).toList()
+                : exact;
+    }
+
+    private static Reason matchReason(String reference, int matchCount) {
+        if (StringUtils.isBlank(reference)) {
+            return Reason.BLANK;
+        }
+        return matchCount > 1 ? Reason.AMBIGUOUS : Reason.NOT_FOUND;
+    }
+
+    private static UnresolvedReference unresolvedField(int fieldIndex, String reference, Reason reason) {
+        return unresolved(Kind.FIELD, 0, fieldIndex, reference, List.of(), reason);
+    }
+
+    private static UnresolvedReference unresolved(Kind kind, int definitionIndex, int fieldIndex, String reference,
+                                                  List<String> options, Reason reason) {
+        return new UnresolvedReference(kind, definitionIndex, fieldIndex, reference, options, reason, false, List.of());
     }
 
     public enum Status {
@@ -222,10 +276,25 @@ public class CreateTaskReferenceResolver {
         }
     }
 
+    public enum Reason {
+        NOT_FOUND,
+        AMBIGUOUS,
+        BLANK,
+        NO_UNIQUE_OWNER,
+        NO_UNIQUE_KEY
+    }
+
     public record UnresolvedReference(Kind kind, int definitionIndex, int fieldIndex, String reference,
-                                      List<String> options) {
+                                      List<String> options, Reason reason, boolean isArray,
+                                      List<String> resolvedValues) {
+        public UnresolvedReference(Kind kind, int definitionIndex, int fieldIndex, String reference,
+                                   List<String> options) {
+            this(kind, definitionIndex, fieldIndex, reference, options, Reason.NOT_FOUND, false, List.of());
+        }
+
         public UnresolvedReference {
             options = options == null ? List.of() : List.copyOf(options);
+            resolvedValues = resolvedValues == null ? List.of() : List.copyOf(resolvedValues);
         }
     }
 }

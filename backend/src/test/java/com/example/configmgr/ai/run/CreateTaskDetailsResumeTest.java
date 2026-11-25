@@ -67,6 +67,15 @@ class CreateTaskDetailsResumeTest {
     private static final String FIELD_ARGUMENTS = "{\"type\":\"EXPORT\",\"defCodes\":[\"货币字典\"],"
             + "\"conditions\":{\"fields\":[{\"fieldCode\":\"未知字段\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
 
+    private static final String IN_ARRAY_ARGUMENTS = "{\"type\":\"EXPORT\",\"defCodes\":[\"货币字典\"],"
+            + "\"conditions\":{\"fields\":[{\"fieldCode\":\"货币代码\",\"operator\":\"IN\",\"value\":[\"usd\",\"未知\"]}]}}";
+
+    private static final String OWNERLESS_ARGUMENTS = "{\"type\":\"EXPORT\",\"defCodes\":[],"
+            + "\"conditions\":{\"fields\":[{\"fieldCode\":\"货币代码\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
+
+    private static final String MULTI_OWNER_ARGUMENTS = "{\"type\":\"EXPORT\",\"defCodes\":[\"货币字典\",\"货币字典\"],"
+            + "\"conditions\":{\"fields\":[{\"fieldCode\":\"未知字段\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
+
     private static final String SYSTEM_TEXT = "PERSONA 行\n\n## 当前工作区状态\n<workspace_state>\n"
             + "页面：任务中心\n</workspace_state>\n";
 
@@ -239,6 +248,88 @@ class CreateTaskDetailsResumeTest {
     }
 
     @Test
+    void inArraySubmissionResumesWithResolvedElementsIntact() {
+        Resolution gap = new CreateTaskReferenceResolver(this::catalog, this.mapper).resolve(IN_ARRAY_ARGUMENTS);
+        seedSubmitted(IN_ARRAY_ARGUMENTS, gap, "{\"enum_value_0_0\":[\"CNY\"]}");
+        when(this.preflight.inspect(eq("create_task"), anyString(), any(AiContext.class)))
+                .thenReturn(passingReport());
+
+        ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+        assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+        assertThat(result.body()).containsEntry("reason", "CREATE_TASK_CONFIRM_PARKED");
+        ArgumentCaptor<String> canonical = ArgumentCaptor.forClass(String.class);
+        verify(this.preflight).inspect(eq("create_task"), canonical.capture(), any(AiContext.class));
+        JsonNode value = read(canonical.getValue()).path("conditions").path("fields").get(0).path("value");
+        assertThat(value.isArray()).isTrue();
+        assertThat(value).extracting(JsonNode::asText).containsExactly("USD", "CNY");
+        assertThat(this.store.pending(RUN_ID, ORIGINAL_CALL).getArguments()).isEqualTo(canonical.getValue());
+        assertThat(this.store.ledger(RUN_ID)).isEmpty();
+    }
+
+    @Test
+    void inArrayCancellationDoesNotCreateTaskOrJob() {
+        Resolution gap = new CreateTaskReferenceResolver(this::catalog, this.mapper).resolve(IN_ARRAY_ARGUMENTS);
+        PendingToolCall parked = seedParked(IN_ARRAY_ARGUMENTS, gap);
+        assertThat(read(parked.getArguments()).path("form").path("fields").get(0).path("type").asText())
+                .isEqualTo("multi_select");
+        GateCalls.submit(this.gate, RUN_ID, parked.getToolCallId(), "{}", "unit-test", true);
+
+        ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+        assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+        verifyNoInteractions(this.preflight);
+        verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+        assertThat(this.store.pending(RUN_ID, ORIGINAL_CALL)).isNull();
+        assertThat(this.store.ledger(RUN_ID)).isEmpty();
+        assertThat(this.store.pendingsLenient(RUN_ID)).allSatisfy(pending -> {
+            assertThat(pending.getCreatedTaskId()).isNull();
+            assertThat(pending.getCreatedJobId()).isNull();
+        });
+    }
+
+    @Test
+    void ownerlessSubmissionInsertsDefinitionAndResumesFieldResolution() {
+        Resolution gap = new CreateTaskReferenceResolver(this::catalog, this.mapper).resolve(OWNERLESS_ARGUMENTS);
+        seedSubmitted(OWNERLESS_ARGUMENTS, gap, "{\"definition_0\":\"货币字典\",\"field_0_0\":\"货币代码\"}");
+        when(this.preflight.inspect(eq("create_task"), anyString(), any(AiContext.class)))
+                .thenReturn(passingReport());
+
+        ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+        assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+        assertThat(result.body()).containsEntry("reason", "CREATE_TASK_CONFIRM_PARKED");
+        ArgumentCaptor<String> canonical = ArgumentCaptor.forClass(String.class);
+        verify(this.preflight).inspect(eq("create_task"), canonical.capture(), any(AiContext.class));
+        JsonNode arguments = read(canonical.getValue());
+        assertThat(arguments.path("defCodes")).extracting(JsonNode::asText).containsExactly("CURRENCY");
+        assertThat(arguments.path("conditions").path("fields").get(0).path("fieldCode").asText()).isEqualTo("code");
+        assertThat(this.store.ledger(RUN_ID)).isEmpty();
+    }
+
+    @Test
+    void multipleOwnerSubmissionFailsClosedWithoutAnotherCorrectionForm() {
+        Resolution legacyGap = new Resolution(Status.UNRESOLVED, MULTI_OWNER_ARGUMENTS, List.of(
+                new UnresolvedReference(Kind.FIELD, -1, 0, "未知字段", List.of())),
+                CreateTaskReferenceResolver.UNRESOLVED_CODE);
+        seedSubmitted(MULTI_OWNER_ARGUMENTS, legacyGap, "{\"field_unknown_0\":\"货币代码\"}");
+
+        ResumeService.ResumeResult result = this.service.resume(RUN_ID);
+
+        assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
+        PendingToolCall create = this.store.pending(RUN_ID, ORIGINAL_CALL);
+        assertThat(create).isNotNull();
+        assertThat(create.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+        assertThat(create.getCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
+        assertThat(create.isExecuted()).isFalse();
+        assertThat(this.store.pendingsLenient(RUN_ID).stream()
+                .filter(pending -> PendingToolCall.PENDING.equals(pending.getStatus()))).isEmpty();
+        verifyNoInteractions(this.preflight);
+        verify(this.emitter, never()).confirmRequest(any(PendingToolCall.class));
+        assertThat(this.store.ledger(RUN_ID)).isEmpty();
+    }
+
+    @Test
     void initialStorageReadFailureConvergesOriginalCreateWithoutHitl() {
         seedParked(ENUM_ARGUMENTS, enumGap("usd"));
         List<Message> history = this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson());
@@ -347,6 +438,8 @@ class CreateTaskDetailsResumeTest {
         assertThat(first.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
         assertThat(second.outcome()).isEqualTo(ResumeService.Outcome.ACCEPTED);
         assertThat(secondSuccessor.getToolCallId()).isNotEqualTo(firstSuccessor.getToolCallId());
+        assertThat(read(secondSuccessor.getArguments()).path("form").path("fields").get(0).path("label").asText())
+                .isEqualTo("字段 1: 仍未知 — 未找到匹配项");
         assertThat(this.store.pendingsLenient(RUN_ID)).hasSize(3);
         assertThat(duplicate.outcome()).isEqualTo(ResumeService.Outcome.PENDING_UNRESOLVED);
         verifyNoInteractions(this.preflight);

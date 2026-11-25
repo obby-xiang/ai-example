@@ -179,3 +179,13 @@ mvn -Dtest=CreateTaskDetailsResumeTest#stillAmbiguousSubmissionStopsBeforeCreate
 - 工程门禁：生产文件已执行 IDEA Reformat Code，生产编译 `BUILD SUCCESS`，规范审查记录随本批提交。完整 RED/GREEN 命令、输出摘要和逐 hunk 自审见任务 3 报告。
 - Task 3 Step 3：`NOT_RUN`，保留给控制器的独立 DeepSeek 真实模型/浏览器复测；三轮 run/session、实参、卡片、任务/作业、XLSX、history 与刷新证据均未产生，真实对照项为 `NOT_REPRODUCED`。本实现上下文未启动或重启服务。
 - Task 3 Step 4：仅完成本任务本地提交，不推送；真实模型结果不得由上述静态审查或方法级测试外推。
+
+## Final fix wave 实施记录（2026-11-25）
+
+- 已修复终审代码项：仅对 `IN` 的枚举字符串数组逐项唯一归一；部分/全部未决数组通过带权威选项和已解析默认值的 `multi_select` 收集完整值，合并时保留已解析元素。标量枚举和非 `IN` 数组的既有处理不变。
+- `defCodes=[]` 且字段非空时，同卡收集可插入 `defCodes[0]` 的配置引用及字段纠正；多配置且字段非空时按既有单配置条件契约直接 `FAILED`，不再反复收集字段文本。
+- `UnresolvedReference` 新增闭集 `Reason`（`NOT_FOUND/AMBIGUOUS/BLANK/NO_UNIQUE_OWNER/NO_UNIQUE_KEY`）及数组恢复元数据；表单 label 包含有界原引用和按 `ReplyLanguage` 本地化的原因，截断使用字符边界且不拆代理对。目录异常仍为 `FAILED`，不进入纠正表单。
+- 终审指出的 `GenerativeFormRules` purpose 清单、`HostForm` 消费方说明及 `SlotDefinition` 名称/标签精确匹配注释已同步，未改其他注释。
+- 15 个新行为/修正方法先取得预期 RED（另有一次缺失 `Reason` 类型的编译 RED）；最终 23 个新增、变更及相邻回归方法均以独立 Maven 命令 GREEN，每次 `Tests run: 1, Failures: 0, Errors: 0`。未执行测试类、套件或循环。
+- 五个生产文件均执行 IDEA Reformat Code 并返回 `ok`；本波 GREEN 实际编译 364 个生产源，最终 `mvn -o -DskipTests compile` 为 `BUILD SUCCESS`（源码已最新）。精确命令和输出摘要见 `final-fix-report.md`。
+- 本波无前端文件变化，前端构建 `NOT_RUN`。Task 3 Step 2b 启动/日志门禁及 Step 3 真实模型验收仍为 `NOT_RUN`，仍由控制器保留；本波未启动/重启服务、未调用模型。

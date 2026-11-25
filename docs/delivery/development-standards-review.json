@@ -8183,6 +8183,87 @@
           "reason": "新嵌套描述方法修正反射位置后取得旧文案RED并独立GREEN，直接受影响createSlotRules方法独立GREEN；AiTools已IDEA Reformat，GREEN实际编译364个生产源码且最终compile BUILD SUCCESS，启动日志和真实模型NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:b437a1d8cb63eaa01bc45cf9177aa18c7b9ec22c0a46bede2619c87a95752b94",
+      "status": "reviewed",
+      "reason": "对最终修复波五个生产Java文件及设计/计划全部暂存hunk逐一复核：IN数组逐项归一与完整多选恢复、零/多配置字段归属、有界未决原因和中英文label均限定在create_task结构化引用链；三个测试文件按规范排除指纹，未改无关注释或运行时验收状态。",
+      "reviewedAt": "2026-11-25T11:31:35.664Z",
+      "reviewer": "Kimi Code final fix wave施工上下文静态逐hunk自审（按任务要求未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "枚举IN字符串数组逐项精确优先且唯一大小写安全归一，未决完整数组以multi_select收集并保留已解析默认值；defCodes为空且字段非空时可同卡插入首个配置，多配置字段非空直接FAILED；UnresolvedReference增加闭集Reason和数组恢复元数据。",
+          "reason": "终审确认旧实现把IN数组asText成标量、零配置字段没有可提交所属配置、多配置反复收字段且所有未决原因不可区分，导致恢复无法收敛或丢失已解析值。",
+          "impact": "仅create_task创建前解析、CREATE_TASK_DETAILS表单及回执合并变化；非IN数组、标量枚举、多配置空条件、scopeKeys、目录FAILED和下游HITL边界保持，启动日志与真实模型仍NOT_RUN。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/CreateTaskDetailsForm.java",
+          "status": "checked",
+          "reason": "buildField为IN未决数组生成权威multi_select及已解析defaultValue，label保留有界原引用和ReplyLanguage原因；mergeDefinition只允许向显式空defCodes插入下标0，数组合并保留默认元素且校验非空字符串，标量路径不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormRules.java",
+          "status": "checked",
+          "reason": "purpose文档清单补入既有CREATE_TASK_DETAILS宿主用途，未增加字段属性、形状白名单或校验分支，通用multi_select规则继续复用。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/HostForm.java",
+          "status": "checked",
+          "reason": "类注消费方从旧两张常规表单的表述改为选择、类型、创建前引用补充和条件兜底共用挂起面，仅注释hunk，无运行逻辑变化。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/CreateTaskReferenceResolver.java",
+          "status": "checked",
+          "reason": "仅IN数组进入逐项optionMatches，零/多/空白和owner/key失败写闭集Reason；零定义生成definition_0及同卡字段，多定义字段非空按单配置规则失败关闭，目录异常仍由既有catch返回FAILED。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/slot/SlotDefinition.java",
+          "status": "checked",
+          "reason": "name和label注释明确CreateTaskReferenceResolver去首尾空白后精确匹配，并区分历史子串/双字词规则；record组件、JsonProperty和keyField逻辑未改。"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-11-25-create-task-structured-references.md",
+          "status": "checked",
+          "reason": "追加final fix wave实际行为、15个不同方法RED及23个独立GREEN、IDEA格式化和364源编译证据，明确无前端变化且启动日志和真实模型NOT_RUN。"
+        },
+        {
+          "path": "docs/superpowers/specs/2026-11-25-create-task-structured-references-design.md",
+          "status": "checked",
+          "reason": "实施记录同步IN数组恢复、owner失败、Reason和Unicode有界label，保留Step 2b/Step 3为NOT_RUN，未把方法级证据外推为真实模型验收。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用既有Jackson ArrayNode、Apache StringUtils、JDK BreakIterator和表单multi_select，没有新增或升级依赖，也未另造框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "触及方法均低于50行且复杂度低于20，控制块保留大括号；options/resolvedValues做不可变防御拷贝，isArray布尔访问器命名明确，无通配import或JSON字段隐式改名。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "未新增日志或异常出口；多配置IllegalArgumentException沿用既有英文技术消息、WARN Throwable和FAILED_CODE，表单只接收安全业务引用与固定本地化原因。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "通用multi_select无需前端改动；中英文label包含有界业务原引用和可行动原因，100字符上限与字符边界由真实表单守卫及单点覆盖，不暴露技术异常。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "回执仍绑定原createTaskArguments并重新解析，数组与owner恢复在预检/HITL前完成；多owner形成真实PRECHECK_FAILED终态，未新增Redis键、TTL、数据库、模型调用或并发共享状态。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "label截断使用BreakIterator字符边界而非UTF-16硬切；emoji边界用UTF-8 encoder取得canEncode=false的RED并在修复后GREEN，未处理字节流或SSE分片。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "15个不同行为方法有预期RED，其中label方法另有Unicode边界RED；最终23个新增/受影响/相邻方法逐个exit 0，五个生产文件IDEA Reformat ok，GREEN实际编译364源且最终compile BUILD SUCCESS，套件、服务日志、真实模型和前端构建NOT_RUN。"
+        }
+      }
     }
   ]
 }

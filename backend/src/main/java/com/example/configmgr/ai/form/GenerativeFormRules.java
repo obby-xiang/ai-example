@@ -32,7 +32,7 @@ import java.util.regex.Pattern;
  * <caption>表单级属性（{@code form}）</caption>
  * <tr><th>属性</th><th>必填</th><th>约束</th></tr>
  * <tr><td>{@code scenario}</td><td>是</td><td>{@code FILTER}（收集筛选条件）/ {@code CLARIFY}（询问澄清）</td></tr>
- * <tr><td>{@code purpose}</td><td>否</td><td>{@code SELECT_DEFINITIONS}（收集配置项选择）/ {@code SET_CONDITIONS}（收集筛选条件，只接受必填 {@code conditionMode} 枚举与 CUSTOM 可见的非必填文本框组成的双字段表单）/ {@code TASK_TYPE}（收集任务类型，固定为<b>单个 enum 单选 {@code EXPORT/IMPORT}</b>）/ {@code GENERAL_CLARIFY}（通用澄清）；缺省固定为 GENERAL_CLARIFY，<b>形状约束只对显式 purpose 生效</b></td></tr>
+ * <tr><td>{@code purpose}</td><td>否</td><td>{@code SELECT_DEFINITIONS}（收集配置项选择）/ {@code SET_CONDITIONS}（收集筛选条件，只接受必填 {@code conditionMode} 枚举与 CUSTOM 可见的非必填文本框组成的双字段表单）/ {@code TASK_TYPE}（收集任务类型，固定为<b>单个 enum 单选 {@code EXPORT/IMPORT}</b>）/ {@code CREATE_TASK_DETAILS}（创建前收集未唯一解析的配置、字段或枚举引用）/ {@code GENERAL_CLARIFY}（通用澄清）；缺省固定为 GENERAL_CLARIFY，<b>形状约束只对显式 purpose 生效</b></td></tr>
  * <tr><td>{@code title}</td><td>否</td><td>文本 ≤ {@value #MAX_TITLE_CHARS} 字符</td></tr>
  * <tr><td>{@code fields}</td><td>是</td><td>1..{@value #MAX_FIELDS} 个字段</td></tr>
  * </table>

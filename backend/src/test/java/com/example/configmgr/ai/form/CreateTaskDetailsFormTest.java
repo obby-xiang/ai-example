@@ -5,6 +5,7 @@ import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.ConfirmGate;
 import com.example.configmgr.ai.gate.CreateTaskReferenceResolver;
 import com.example.configmgr.ai.gate.CreateTaskReferenceResolver.Kind;
+import com.example.configmgr.ai.gate.CreateTaskReferenceResolver.Reason;
 import com.example.configmgr.ai.gate.CreateTaskReferenceResolver.Resolution;
 import com.example.configmgr.ai.gate.CreateTaskReferenceResolver.Status;
 import com.example.configmgr.ai.gate.CreateTaskReferenceResolver.UnresolvedReference;
@@ -16,6 +17,7 @@ import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
 import com.example.configmgr.ai.run.SseChatEmitter;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
+import com.example.configmgr.ai.slot.SlotDefinition;
 import com.example.configmgr.ai.tool.AiContext;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -27,6 +29,7 @@ import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.context.i18n.LocaleContextHolder;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Locale;
 
@@ -115,6 +118,9 @@ class CreateTaskDetailsFormTest {
         assertThat(fields.get(1).path("type").asText()).isEqualTo("text");
         assertThat(fields.get(2).path("type").asText()).isEqualTo("enum");
         assertThat(fields.get(2).path("options").findValuesAsText("value")).containsExactly("CNY", "USD");
+        assertThat(fields.get(0).path("label").asText()).isEqualTo("配置项 1: 未知字典 — 未找到匹配项");
+        assertThat(fields.get(1).path("label").asText()).isEqualTo("字段 1: 未知字段 — 未找到匹配项");
+        assertThat(fields.get(2).path("label").asText()).isEqualTo("选项值 1: usd — 未找到匹配项");
         assertThat(fields).allMatch(field -> field.path("required").asBoolean());
         assertThat(read(pending.getArguments()).path("form").path("purpose").asText())
                 .isEqualTo(FormPurposes.CREATE_TASK_DETAILS);
@@ -122,10 +128,33 @@ class CreateTaskDetailsFormTest {
     }
 
     @Test
+    void ambiguousInArrayRequestsCompleteMultiSelectValue() {
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"IN\",\"value\":[\"USD\",\"CnY\"]}]}}";
+        SlotDefinition definition = new SlotDefinition("CURRENCY", "货币字典", List.of(
+                new SlotDefinition.SlotField("code", "货币代码", true, List.of("CNY", "cny", "USD"))));
+        Resolution resolution = new CreateTaskReferenceResolver(() -> List.of(definition), this.mapper).resolve(arguments);
+        assertThat(resolution.unresolved()).singleElement()
+                .satisfies(reference -> assertThat(reference.reason()).isEqualTo(Reason.AMBIGUOUS));
+
+        boolean parked = this.form.parkIfUnresolved(RUN_ID, ORIGINAL_CALL, arguments, resolution, history());
+
+        assertThat(parked).isTrue();
+        PendingToolCall pending = this.store.pendingsLenient(RUN_ID).getFirst();
+        JsonNode field = read(pending.getArguments()).path("form").path("fields").get(0);
+        assertThat(field.path("type").asText()).isEqualTo("multi_select");
+        assertThat(field.path("options").findValuesAsText("value")).containsExactly("CNY", "cny", "USD");
+        assertThat(field.path("defaultValue")).extracting(JsonNode::asText).containsExactly("USD");
+        assertThat(this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME, pending.getArguments(),
+                AiContext.of("tasks", null, null, null, null)).accepted()).isTrue();
+    }
+
+    @Test
     void formPassesWhitelistAndUsesReplyLanguage() {
         LocaleContextHolder.setLocale(Locale.ENGLISH);
+        String reference = "usd" + "x".repeat(33) + "😀" + "x".repeat(84);
         Resolution resolution = new Resolution(Status.UNRESOLVED, ORIGINAL_ARGUMENTS, List.of(
-                new UnresolvedReference(Kind.ENUM_VALUE, 0, 0, "usd", List.of("CNY", "USD"))),
+                new UnresolvedReference(Kind.ENUM_VALUE, 0, 0, reference, List.of("CNY", "USD"))),
                 CreateTaskReferenceResolver.UNRESOLVED_CODE);
 
         boolean parked = this.form.parkIfUnresolved(RUN_ID, ORIGINAL_CALL, ORIGINAL_ARGUMENTS, resolution, history());
@@ -135,9 +164,14 @@ class CreateTaskDetailsFormTest {
         assertThat(this.guard.inspectArguments(GenerativeFormRules.TOOL_NAME, pending.getArguments(),
                 AiContext.of("tasks", null, null, null, null)).accepted()).isTrue();
         assertThat(pending.getArguments()).contains(CreateTaskDetailsForm.TITLE_EN)
-                .contains("Value 1")
+                .contains("Value 1: usd")
+                .contains("No matching option")
                 .doesNotContain(CreateTaskDetailsForm.TITLE)
                 .doesNotContain("选项值");
+        JsonNode field = read(pending.getArguments()).path("form").path("fields").get(0);
+        String label = field.path("label").asText();
+        assertThat(label.length()).isLessThanOrEqualTo(GenerativeFormRules.MAX_LABEL_CHARS);
+        assertThat(StandardCharsets.UTF_8.newEncoder().canEncode(label)).isTrue();
         assertThat(ReplyLanguage.current().english()).isTrue();
     }
 
