@@ -62,7 +62,7 @@ public class CreateTaskReferenceResolver {
                                                      List<UnresolvedReference> unresolved) {
         JsonNode references = root.get("defCodes");
         if (references == null || references.isNull()) {
-            return List.of();
+            throw new IllegalArgumentException("defCodes is required and must be an array");
         }
         if (!(references instanceof ArrayNode array)) {
             throw new IllegalArgumentException("defCodes must be an array");

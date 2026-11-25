@@ -444,7 +444,7 @@ public class AiTools {
      * @param toolContext 宿主上下文（含 {@code runId}，单轮上限/幂等的作用域）；直调测试可为 null
      */
     @Tool(name = AiToolNames.CREATE_TASK, description = "用户明确要新建导出/导入任务时直接调用（任务中心、已有任务或已完成任务页面都适用）：不要先追问配置项、筛选条件或数据文件，也不要用 list_config_defs 或 get_config_def 代替创建或作为创建前置。"
-            + "需要任务类型 type（EXPORT/IMPORT）、可选 title、可选 defCodes；EXPORT 还必须显式传 conditions：defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由；条件未决定时传 {}，不得省略。"
+            + "需要任务类型 type（EXPORT/IMPORT）、可选 title、必传 defCodes 数组（未提及配置时显式传 []）；EXPORT 还必须显式传 conditions：defCodes 与 conditions 独立判断，空条件不能成为省略已知配置的理由；条件未决定时传 {}，不得省略。"
             + "单配置且条件已知时 defCodes=[该项] 并传非空 conditions；非空 conditions 只允许一个 defCode。多配置且条件已知时保留全部已知 defCodes，创建载荷 conditions={}，随后一次 set_conditions(items) 物化逐项条件；多配置不同或相同条件均走该分支。此时 {} 只表示创建载荷不承载逐项条件，不表示用户条件未知，更不是明确不设。"
             + "defCodes/conditions 只是候选（只存在会话/Redis 里，随会话失效）：创建时只建任务，不写配置项勾选、不写条件条目，也不改业务库条件。用户提及配置时，defCodes 必须保留其编码或名称，由宿主唯一解析为权威编码；只有未提及时才传空数组，不得因不知道内部编码而省略。"
             + "紧凑修饰也可构成条件，不要求出现“筛选”“条件”或等号关键词；只有能唯一确定所属配置、字段、算子和值/范围时才视为已知条件；字段编码未知时保留条件并传 fieldCode=null，由宿主唯一解析，不得丢弃条件或猜测。后续 select_definitions/set_conditions 只物化草案。条件已知（对话里已给）时由前端 set_conditions 形成草案，宿主不再弹条件表；条件未知时宿主提供 conditionMode=ALL/CUSTOM 表单。"
@@ -461,7 +461,7 @@ public class AiTools {
     public String createTask(
             @ToolParam(description = "任务类型：EXPORT（导出配置）/ IMPORT（导入配置）") String type,
             @ToolParam(description = "任务标题，不传则按类型生成默认标题", required = false) String title,
-            @ToolParam(description = "可选：配置定义编码或名称的结构化数组，例如 [\"CONFIG_CODE\"]；提及时保留引用并由宿主解析，仅作宿主槽位候选，不在创建时隐式落库", required = false) String[] defCodes,
+            @ToolParam(description = "必传：配置定义编码或名称的结构化数组，例如 [\"CONFIG_CODE\"]；未提及时显式传 []，提及时保留引用并由宿主解析，仅作宿主槽位候选，不在创建时隐式落库", required = true) String[] defCodes,
             @ToolParam(description = "导出任务必传的条件对象；条件未决定时也传 {}，不得省略。导入任务不传", required = false) FieldQueryCondition conditions,
             @ToolParam(description = "是否另建独立任务；省略或 false 表示可续接当前任务", required = false) Boolean independent,
             @ToolParam(description = "是否打开向导；省略或 true 表示打开，用户明确限定创建后停止时传 false", required = false) Boolean openWizard,

@@ -95,7 +95,7 @@ class SpToolCallingManagerPendingArgumentsTest {
 
     @Test
     void argumentsAreByteIdenticalAcrossUserTexts() {
-        String original = "{\"type\":\"EXPORT\",\"openWizard\":false,\"conditions\":{}}";
+        String original = "{\"type\":\"EXPORT\",\"defCodes\":[],\"openWizard\":false,\"conditions\":{}}";
         String empty = bind(original, "").getArguments();
         assertThat(bind(original, "只创建").getArguments()).isEqualTo(empty);
         assertThat(bind(original, "仅创建").getArguments()).isEqualTo(empty);
@@ -107,14 +107,17 @@ class SpToolCallingManagerPendingArgumentsTest {
 
     @Test
     void missingTypeStaysOnTaskTypePath() {
-        PendingToolCall pending = bind("{\"conditions\":{}}", "创建导出任务");
+        PendingToolCall pending = bind("{\"defCodes\":[],\"conditions\":{}}", "创建导出任务");
         assertThat(TaskTypeForm.typeMissingOrInvalid(pending.getArguments())).isTrue();
     }
 
     @Test
-    void missingDefCodesStayForPostCreateCollection() {
-        PendingToolCall pending = bind("{\"type\":\"EXPORT\",\"conditions\":{}}", "导出货币字典");
-        assertThat(read(pending.getArguments()).has("defCodes")).isFalse();
+    void explicitEmptyDefCodesStayForPostCreateCollection() {
+        installResolver(List::of);
+        PendingToolCall pending = bind("{\"type\":\"EXPORT\",\"defCodes\":[],\"conditions\":{}}", "普通问答");
+        assertThat(read(pending.getArguments()).path("defCodes").isArray()).isTrue();
+        assertThat(read(pending.getArguments()).path("defCodes").isEmpty()).isTrue();
+        assertThat(pending.getCode()).isNull();
     }
 
     @Test
@@ -131,7 +134,7 @@ class SpToolCallingManagerPendingArgumentsTest {
 
     @Test
     void exportWithoutConditionsIsRejectedEvenWhenTextCouldSupplyThem() {
-        PendingToolCall pending = bind("{\"type\":\"EXPORT\"}", "导出CNY货币字典");
+        PendingToolCall pending = bind("{\"type\":\"EXPORT\",\"defCodes\":[]}", "导出CNY货币字典");
         assertThat(this.preflight.inspect("create_task", pending.getArguments(), AiContext.empty()).pass()).isFalse();
     }
 
@@ -202,6 +205,34 @@ class SpToolCallingManagerPendingArgumentsTest {
     }
 
     @Test
+    void missingDefCodesFailClosedBeforePreflightOrHitl() {
+        installResolver(List::of);
+        assertDefCodesOmissionBlocked("{\"type\":\"EXPORT\",\"conditions\":{}}");
+    }
+
+    @Test
+    void nullDefCodesFailClosedBeforePreflightOrHitl() {
+        installResolver(List::of);
+        assertDefCodesOmissionBlocked("{\"type\":\"EXPORT\",\"defCodes\":null,\"conditions\":{}}");
+    }
+
+    @Test
+    void explicitEmptyDefCodesRetainPostCreateCollectionPath() {
+        installResolver(List::of);
+        when(this.preflightProbe.inspect(eq("create_task"), anyString(), any(AiContext.class)))
+                .thenReturn(failingReport());
+        String original = "{\"type\":\"EXPORT\",\"defCodes\":[],\"conditions\":{}}";
+        execute(original);
+
+        ArgumentCaptor<String> arguments = ArgumentCaptor.forClass(String.class);
+        verify(this.preflightProbe).inspect(eq("create_task"), arguments.capture(), any(AiContext.class));
+        assertThat(arguments.getValue()).isEqualTo(original);
+        assertThat(read(arguments.getValue()).path("defCodes").isArray()).isTrue();
+        assertThat(read(arguments.getValue()).path("defCodes").isEmpty()).isTrue();
+        verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+    }
+
+    @Test
     void exportNonEmptyConditionsPassUnchanged() {
         String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
         PendingToolCall pending = bind(original, "普通问答");
@@ -211,27 +242,29 @@ class SpToolCallingManagerPendingArgumentsTest {
 
     @Test
     void importWithoutConditionsPasses() {
-        String original = "{\"type\":\"IMPORT\"}";
+        installResolver(List::of);
+        String original = "{\"type\":\"IMPORT\",\"defCodes\":[]}";
         PendingToolCall pending = bind(original, "普通问答");
         assertThat(pending.getArguments()).isEqualTo(original);
+        assertThat(pending.getCode()).isNull();
         assertThat(this.preflight.inspect("create_task", pending.getArguments(), AiContext.empty()).pass()).isTrue();
     }
 
     @Test
     void openWizardDefaultsToTrue() {
-        PendingToolCall pending = bind("{\"type\":\"EXPORT\",\"conditions\":{}}", "普通问答");
+        PendingToolCall pending = bind("{\"type\":\"EXPORT\",\"defCodes\":[],\"conditions\":{}}", "普通问答");
         assertThat(RunContextRefresher.openWizard(pending.getArguments())).isTrue();
     }
 
     @Test
     void openWizardTrueStaysTrue() {
-        PendingToolCall pending = bind("{\"type\":\"EXPORT\",\"openWizard\":true,\"conditions\":{}}", "普通问答");
+        PendingToolCall pending = bind("{\"type\":\"EXPORT\",\"defCodes\":[],\"openWizard\":true,\"conditions\":{}}", "普通问答");
         assertThat(RunContextRefresher.openWizard(pending.getArguments())).isTrue();
     }
 
     @Test
     void openWizardFalseStaysFalse() {
-        String original = "{\"type\":\"EXPORT\",\"openWizard\":false,\"conditions\":{}}";
+        String original = "{\"type\":\"EXPORT\",\"defCodes\":[],\"openWizard\":false,\"conditions\":{}}";
         PendingToolCall pending = bind(original, "普通问答");
         assertThat(pending.getArguments()).isEqualTo(original);
         assertThat(RunContextRefresher.openWizard(pending.getArguments())).isFalse();
@@ -239,11 +272,12 @@ class SpToolCallingManagerPendingArgumentsTest {
 
     @Test
     void openWizardNonBooleanStaysFalse() {
-        PendingToolCall pending = bind("{\"type\":\"EXPORT\",\"openWizard\":\"yes\",\"conditions\":{}}", "普通问答");
+        PendingToolCall pending = bind("{\"type\":\"EXPORT\",\"defCodes\":[],\"openWizard\":\"yes\",\"conditions\":{}}", "普通问答");
         assertThat(RunContextRefresher.openWizard(pending.getArguments())).isFalse();
     }
 
     private PendingToolCall bind(String arguments, String userText) {
+        installResolver(() -> List.of(currencySlot()));
         PendingToolCall pending = new PendingToolCall();
         pending.setToolCallId("call-create");
         pending.setName("create_task");
@@ -283,6 +317,20 @@ class SpToolCallingManagerPendingArgumentsTest {
         ArgumentCaptor<PendingToolCall> captor = ArgumentCaptor.forClass(PendingToolCall.class);
         verify(this.store).putPending(eq("run-pending-arguments"), captor.capture());
         return captor.getValue();
+    }
+
+    private void assertDefCodesOmissionBlocked(String original) {
+        when(this.preflightProbe.inspect(eq("create_task"), anyString(), any(AiContext.class)))
+                .thenReturn(failingReport());
+        execute(original);
+
+        verify(this.preflightProbe, never()).inspect(anyString(), anyString(), any(AiContext.class));
+        verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+        PendingToolCall pending = capturedPending();
+        assertThat(pending.getCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
+        assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+        assertThat(pending.getArguments()).isEqualTo(original);
+        assertThat(pending.isExecuted()).isFalse();
     }
 
     private static ToolPreflightService.PreflightReport failingReport() {

@@ -7762,6 +7762,62 @@
           "reason": "三个审查回归方法分别取得预期RED并独立GREEN，另四个相邻方法逐个通过；最终IDEA定向build无问题、Maven compile成功且最终测试实际编译363个生产源；全量套件和真实模型NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:5e4faaff4841a692d1843c897c0f3009e539168a3b46b13012bd73ee04ed600c",
+      "status": "reviewed",
+      "reason": "对第二轮审查修复的两个生产文件全部暂存hunk逐一静态复核，确认create_task只把显式defCodes空数组作为合法未提及形态，缺失和null均在预检/HITL前失败关闭；未发现剩余问题。",
+      "reviewedAt": "2026-11-25T15:56:40+08:00",
+      "reviewer": "Kimi Code Task 1第二轮审查修复上下文静态逐hunk自审（按用户要求未派遣独立reviewer）",
+      "specChanges": [
+        {
+          "change": "create_task的defCodes改为required=true的必传数组；缺失或null返回FAILED，只有显式[]表示用户未提及配置并保留既有创建后收集路径。",
+          "reason": "原optional声明和缺失即空列表的实现保留了任务要求消除的模型省略路径，且与批准规格的必填数组语义不一致。",
+          "impact": "EXPORT和IMPORT均须显式携带defCodes；其他工具、多配置、条件、openWizard及既有创建后配置收集语义不变。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/CreateTaskReferenceResolver.java",
+          "status": "checked",
+          "reason": "缺失或null defCodes抛出结构异常并经既有FAILED结果失败关闭，显式空数组仍进入原解析流程；触及方法规模不变，已IDEA Reformat。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java",
+          "status": "checked",
+          "reason": "仅create_task的defCodes参数显式required=true，工具描述和参数描述同步为必传数组及未提及传[]；其他工具未改，已IDEA Reformat。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "仅修改既有ToolParam属性和Jackson节点分支，复用原FAILED结果与目录流程，无新增依赖或模型调用。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增分支显式大括号并保持集合返回契约，方法行数和复杂度未越界；注解required值显式固定，无新增import或JSON字段改名。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "缺失/null结构经既有WARN保留Throwable，并只向后续链路提供稳定FAILED码，不回传原始异常或敏感参数。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "未新增用户卡片或文案，显式[]继续既有创建后配置收集，非法省略不会出现误导性的创建确认卡。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "缺失/null在预检与HITL前零业务副作用阻断，未新增Redis、数据库或共享状态；显式[]协议保持兼容。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "仍只处理完整JSON树并区分缺失、null和空数组节点，不涉及文本、字节流、SSE或Unicode截断。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "resolver、工具契约、manager缺失和manager null四个方法均有预期RED→GREEN；显式空数组路径及九个受影响既有方法逐个GREEN；最终IDEA build无问题、Maven compile成功且契约测试实际编译363个生产源；全量套件和真实模型NOT_RUN。"
+        }
+      }
     }
   ]
 }

@@ -5,9 +5,13 @@ import com.example.configmgr.ai.gate.CreateTaskReferenceResolver.Status;
 import com.example.configmgr.ai.slot.DefinitionCatalog;
 import com.example.configmgr.ai.slot.SlotDefinition;
 import com.example.configmgr.ai.slot.SlotDefinition.SlotField;
+import com.example.configmgr.ai.tools.AiTools;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.springframework.ai.chat.model.ToolContext;
+import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.ToolParam;
 
 import java.util.List;
 
@@ -176,6 +180,41 @@ class CreateTaskReferenceResolverTest {
         assertThat(scalarResult.status()).isEqualTo(Status.FAILED);
         assertThat(scalarResult.failureCode()).isEqualTo("CREATE_TASK_REFERENCE_RESOLUTION_FAILED");
         assertThat(scalarResult.canonicalArguments()).isEqualTo(scalar);
+    }
+
+    @Test
+    void defCodesMissingOrNullFailButExplicitEmptyArrayResolves() {
+        CreateTaskReferenceResolver resolver = resolver(List::of);
+        String missing = "{\"type\":\"EXPORT\",\"conditions\":{}}";
+        String explicitNull = "{\"type\":\"EXPORT\",\"defCodes\":null,\"conditions\":{}}";
+        String explicitEmpty = "{\"type\":\"EXPORT\",\"defCodes\":[],\"conditions\":{}}";
+
+        CreateTaskReferenceResolver.Resolution missingResult = resolver.resolve(missing);
+        assertThat(missingResult.status()).isEqualTo(Status.FAILED);
+        assertThat(missingResult.failureCode()).isEqualTo("CREATE_TASK_REFERENCE_RESOLUTION_FAILED");
+        assertThat(missingResult.canonicalArguments()).isEqualTo(missing);
+
+        CreateTaskReferenceResolver.Resolution nullResult = resolver.resolve(explicitNull);
+        assertThat(nullResult.status()).isEqualTo(Status.FAILED);
+        assertThat(nullResult.failureCode()).isEqualTo("CREATE_TASK_REFERENCE_RESOLUTION_FAILED");
+        assertThat(nullResult.canonicalArguments()).isEqualTo(explicitNull);
+
+        CreateTaskReferenceResolver.Resolution emptyResult = resolver.resolve(explicitEmpty);
+        assertThat(emptyResult.status()).isEqualTo(Status.RESOLVED);
+        assertThat(emptyResult.canonicalArguments()).isEqualTo(explicitEmpty);
+        assertThat(emptyResult.unresolved()).isEmpty();
+    }
+
+    @Test
+    void createTaskRequiresDefCodesArrayInToolContract() throws NoSuchMethodException {
+        var method = AiTools.class.getDeclaredMethod("createTask", String.class, String.class, String[].class,
+                AiTools.FieldQueryCondition.class, Boolean.class, Boolean.class, ToolContext.class);
+        ToolParam defCodes = method.getParameters()[2].getAnnotation(ToolParam.class);
+        Tool tool = method.getAnnotation(Tool.class);
+
+        assertThat(defCodes.required()).isTrue();
+        assertThat(defCodes.description()).contains("必传").doesNotContain("可选");
+        assertThat(tool.description()).contains("必传 defCodes 数组").doesNotContain("可选 defCodes");
     }
 
     private CreateTaskReferenceResolver resolver(DefinitionCatalog catalog) {
