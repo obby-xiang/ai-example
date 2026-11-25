@@ -135,6 +135,21 @@ class FlowTypeConditionPromptContractTest {
     }
 
     @Test
+    void createTaskFieldReferenceSemanticsStayScopedInNestedDescription() throws NoSuchMethodException {
+        ToolParam fieldCode = AiTools.FieldCondition.class
+                .getDeclaredConstructor(String.class, String.class, Object.class)
+                .getParameters()[0].getAnnotation(ToolParam.class);
+
+        assertThat(fieldCode).isNotNull();
+        assertThat(fieldCode.description())
+                .contains("其他工具保持字段编码语义，不接受标签或 null")
+                .contains("仅 create_task 还可传精确字段标签")
+                .contains("字段未知时传 null，由宿主解析或在创建前收集")
+                .doesNotContain("其他工具可传字段标签")
+                .doesNotContain("其他工具可传 null");
+    }
+
+    @Test
     void toolsVersionIsBumpedForTheNewDescriptions() {
         assertThat(new YamlToolDefinitionSource().version()).isEqualTo("2026-10-27.42");
     }

@@ -157,3 +157,9 @@
 - 五个生产文件已执行 IDEA Reformat Code；生产代码在 GREEN 阶段实际重新编译 364 个源码文件成功，最终 `mvn -o -DskipTests compile` 为 `BUILD SUCCESS`（最终无新增待编译源码）。未执行全量测试、服务启动或启动日志验收。
 - Step 3 真实模型独立三轮复测由控制器另行安排，本实现上下文为 `NOT_RUN`：无 run/session、canonical 实参、HITL、任务 items、作业/XLSX、history/刷新或 transcript 证据；真实对照场景均 `NOT_REPRODUCED`。未使用浏览器或 CU，未启动/重启服务。
 - 本文作为现行规格保留并记录实施结果；检索到的旧提示历史版本记录保持原貌，其他现行规格未发现需要随本批改写的冲突条款。
+
+## Fix round 1 实施记录（2026-11-25）
+
+- `FieldCondition.fieldCode` 的嵌套模型可见 `@ToolParam` 已补齐作用域：其他工具保持字段编码语义且不接受标签或 `null`；仅 `create_task` 还可传精确字段标签，字段未知时传 `null` 由宿主解析或在创建前收集。未把其他工具的字段语义改为标签/`null` 引用。
+- 新增 `FlowTypeConditionPromptContractTest#createTaskFieldReferenceSemanticsStayScopedInNestedDescription`，直接检查 canonical 构造器参数上的真实注解描述；修正反射读取位置后取得旧文案 `字段编码，例如 code` 的预期 RED，实施后为 GREEN。直接受影响的 `createSlotRulesStaySynchronizedAcrossYamlAndAnnotation` 也单独复验 GREEN。
+- 启动后的实际版本与 WARN/异常日志门禁仍为 `NOT_RUN`，真实模型/浏览器复测仍为 `NOT_RUN`；方法级测试不构成这些门禁的完成证据。

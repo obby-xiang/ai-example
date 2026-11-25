@@ -150,13 +150,17 @@ mvn -Dtest=CreateTaskDetailsResumeTest#stillAmbiguousSubmissionStopsBeforeCreate
 - Consumes: 任务 1/2 已实现的同名引用与 canonical 行为。
 - Produces: 模型可见描述统一为“未提及时传空；提及时传编码或名称；字段未知时保留条件并传 `fieldCode=null`”，不再出现“无法映射就省略/先创建后补充”的冲突口径。
 
-- [ ] **Step 1: 更新提示失败断言**
+- [x] **Step 1: 更新提示失败断言**
 
 覆盖 `createSlotRulesStaySynchronizedAcrossYamlAndAnnotation`、`correctionInstructionUsesCurrentSchemaAndPreservesPureQuestionAnswer`、`toolsVersionBumpedForKnownInfoDescriptions`，并保留多配置、明确全量与 `scopeKeys` 的既有语义断言。先逐个确认旧提示下 RED。
 
-- [ ] **Step 2: 同步所有模型可见描述并逐个验证 GREEN**
+- [x] **Step 2a: 同步所有模型可见描述并逐个验证 GREEN**
 
-分别执行相关方法级单点；不得批量运行测试类。启动后核对实际 `definitionsVersion=2026-10-27.42` 和日志，无 WARN/异常才能进入真实复测。
+分别执行相关方法级单点；不得批量运行测试类。嵌套 `FieldCondition.fieldCode` 描述必须限定只有 `create_task` 接受精确字段标签或 `null`，其他工具保持字段编码语义。
+
+- [ ] **Step 2b: 启动版本与日志门禁**
+
+启动后核对实际 `definitionsVersion=2026-10-27.42` 和日志，无 WARN/异常才能进入真实复测。当前为 `NOT_RUN`；Step 2a 的提示同步和方法级 GREEN 不代表本门禁完成。
 
 - [ ] **Step 3: 真实模型独立复测**
 
@@ -170,7 +174,8 @@ mvn -Dtest=CreateTaskDetailsResumeTest#stillAmbiguousSubmissionStopsBeforeCreate
 
 - Task 1/2：实现、审查和推送已完成，终点为 `c15f97df`。同名结构化引用 canonical 化及 `CREATE_TASK_DETAILS` 创建前收集/恢复均已落地，计划中的禁止事项保持有效。
 - Task 3 Step 1：已完成。三个指定提示/版本方法及六个补充提示、版本和守卫方法先在旧生产文本上分别取得预期 RED；多配置与 `scopeKeys` 回归作为 GREEN 对照保留，不宣称其独立 RED。
-- Task 3 Step 2：已完成。`AiTools`、`tools.yaml`、`ResilientChatService`、`PromptRulePacks` 以及实际仍含旧口径的 `GenerativeFormGuard` 已同步；`definitionsVersion=2026-10-27.42` 由四个独立版本相关方法的运行日志确认。最终 12 个方法级单点分别执行并全部通过；未批量运行测试类或测试套件。
-- 工程门禁：五个生产文件已执行 IDEA Reformat Code，生产编译 `BUILD SUCCESS`，规范审查记录随本批提交。完整 RED/GREEN 命令、输出摘要和逐 hunk 自审见任务 3 报告。
+- Task 3 Step 2a：已完成。`AiTools`、`tools.yaml`、`ResilientChatService`、`PromptRulePacks` 以及实际仍含旧口径的 `GenerativeFormGuard` 已同步；`definitionsVersion=2026-10-27.42` 由四个独立版本相关方法的运行日志确认。原 12 个方法级单点分别执行并全部通过；fix round 1 新增嵌套 `fieldCode` 作用域断言并复验直接受影响提示方法，也未批量运行测试类或测试套件。
+- Task 3 Step 2b：`NOT_RUN`。未启动服务，实际启动版本和启动/运行日志中的 WARN/异常门禁尚未执行，不得因 Step 2a 完成而进入真实复测。
+- 工程门禁：生产文件已执行 IDEA Reformat Code，生产编译 `BUILD SUCCESS`，规范审查记录随本批提交。完整 RED/GREEN 命令、输出摘要和逐 hunk 自审见任务 3 报告。
 - Task 3 Step 3：`NOT_RUN`，保留给控制器的独立 DeepSeek 真实模型/浏览器复测；三轮 run/session、实参、卡片、任务/作业、XLSX、history 与刷新证据均未产生，真实对照项为 `NOT_REPRODUCED`。本实现上下文未启动或重启服务。
 - Task 3 Step 4：仅完成本任务本地提交，不推送；真实模型结果不得由上述静态审查或方法级测试外推。

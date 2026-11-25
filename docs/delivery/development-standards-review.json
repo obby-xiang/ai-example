@@ -8122,6 +8122,67 @@
           "reason": "三个指定方法及六个补充方法取得预期RED，守卫文案补强另做一次RED；最终12个不同方法分别GREEN。IDEA Reformat和实际生产编译成功，全量测试、服务日志、真实模型/浏览器NOT_RUN，真实对照NOT_REPRODUCED。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:2174a49e43aeeae63c68eab5139a26fcc8227ec362159cabe7aef948ada8bb24",
+      "status": "reviewed",
+      "reason": "对Task 3 fix round 1的AiTools嵌套参数描述、设计追加记录和计划Step 2拆分全部暂存hunk逐一复核，确认字段标签/null仅扩展create_task，其他工具仍只接受字段编码，启动日志门禁不再被方法级测试冒充完成。",
+      "reviewedAt": "2026-11-25T18:12:22+08:00",
+      "reviewer": "Kimi Code Task 3 fix round 1施工上下文静态逐hunk自审（未派遣独立reviewer）",
+      "specChanges": [
+        {
+          "change": "FieldCondition.fieldCode嵌套模型描述明确其他工具保持字段编码且不接受标签/null，仅create_task接受精确字段标签或未知字段null；计划将提示/方法验证Step 2a与启动版本/日志Step 2b拆分。",
+          "reason": "原嵌套描述只有字段编码，与create_task顶层引用契约不一致；原Step 2完成表述可能把尚未执行的启动日志门禁混入已完成范围。",
+          "impact": "嵌套Schema与顶层提示一致且不改变set_conditions等其他工具语义；Step 2b及真实模型前置门禁保持NOT_RUN，版本仍为2026-10-27.42。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tools/AiTools.java",
+          "status": "checked",
+          "reason": "仅修改FieldCondition.fieldCode的ToolParam描述，保留字段名、JsonProperty、required默认值和record签名；create_task作用域及其他工具拒绝标签/null均已明示，已IDEA Reformat。"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-11-25-create-task-structured-references.md",
+          "status": "checked",
+          "reason": "Step 1和提示/方法级Step 2a按实际结果勾选，新增未勾选且NOT_RUN的Step 2b启动版本/日志门禁，实施记录同步区分两类证据。"
+        },
+        {
+          "path": "docs/superpowers/specs/2026-11-25-create-task-structured-references-design.md",
+          "status": "checked",
+          "reason": "追加嵌套字段描述的作用域、canonical构造器反射RED/GREEN及直接受影响方法复验，真实模型和启动日志仍NOT_RUN。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "仅修改既有注解字符串和Markdown，没有新增依赖、库调用或替代组件。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "record组件、String类型、JsonProperty和ToolParam required默认值不变，未增加方法、分支、集合、JSON隐式字段或Lombok语义。"
+        },
+        "logging-exception-safety": {
+          "status": "not-affected",
+          "reason": "本批不含日志、异常处理、错误响应或敏感信息输出代码，仅调整模型参数说明和验证文档。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "未修改前端、终端用户文案、卡片或i18n；变化仅作用于模型可见工具Schema说明和施工文档。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "仅create_task扩展标签/null引用语义，其他工具字段编码约束不变；pending、预检、HITL、Redis、数据库和并发代码均未触及。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "完整注解文本和Markdown编辑不涉及字节解码、SSE分片、代理对或截断处理。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "新嵌套描述方法修正反射位置后取得旧文案RED并独立GREEN，直接受影响createSlotRules方法独立GREEN；AiTools已IDEA Reformat，GREEN实际编译364个生产源码且最终compile BUILD SUCCESS，启动日志和真实模型NOT_RUN。"
+        }
+      }
     }
   ]
 }

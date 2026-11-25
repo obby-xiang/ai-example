@@ -806,7 +806,7 @@ public class AiTools {
 
     /** 单字段条件。 */
     public record FieldCondition(
-            @JsonProperty("fieldCode") @ToolParam(description = "字段编码，例如 code") String fieldCode,
+            @JsonProperty("fieldCode") @ToolParam(description = "字段编码，例如 code；其他工具保持字段编码语义，不接受标签或 null；仅 create_task 还可传精确字段标签，字段未知时传 null，由宿主解析或在创建前收集") String fieldCode,
             @JsonProperty("operator") @ToolParam(description = "操作符（闭集，见 ConditionOperators）：" + ConditionOperators.JOINED_NAMES) String operator,
             @JsonProperty("value") @ToolParam(description = "条件值（文本/数字）；EMPTY/NOT_EMPTY 不传，IN 传字符串数组", required = false) Object value) {
     }
