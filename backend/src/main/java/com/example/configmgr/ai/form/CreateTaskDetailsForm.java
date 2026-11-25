@@ -24,12 +24,10 @@ import java.nio.charset.StandardCharsets;
 import java.text.BreakIterator;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 
 @Slf4j
@@ -257,7 +255,7 @@ public class CreateTaskDetailsForm extends HostForm {
             return;
         }
         if ("multi_select".equals(formField.path("type").asText())) {
-            mergeEnumArray(root, key, formField.path("defaultValue"), value);
+            mergeEnumArray(root, key, value);
             return;
         }
         if (value == null || !value.isTextual() || StringUtils.isBlank(value.asText())) {
@@ -283,7 +281,7 @@ public class CreateTaskDetailsForm extends HostForm {
         definitions.set(index, value);
     }
 
-    private static void mergeEnumArray(ObjectNode root, String key, JsonNode defaults, JsonNode value) {
+    private static void mergeEnumArray(ObjectNode root, String key, JsonNode value) {
         if (value == null || !value.isArray() || value.isEmpty()) {
             throw new IllegalArgumentException("Missing create task enum array");
         }
@@ -291,24 +289,14 @@ public class CreateTaskDetailsForm extends HostForm {
         if (!"value".equals(target.property()) || !target.field().path("value").isArray()) {
             throw new IllegalArgumentException("Enum array target mismatch");
         }
-        Set<String> merged = new LinkedHashSet<>();
-        appendArrayValues(merged, defaults);
-        appendArrayValues(merged, value);
         ArrayNode array = JSON.createArrayNode();
-        merged.forEach(array::add);
-        target.field().set("value", array);
-    }
-
-    private static void appendArrayValues(Set<String> target, JsonNode values) {
-        if (values == null || !values.isArray()) {
-            throw new IllegalArgumentException("Create task enum values must be an array");
-        }
-        for (JsonNode value : values) {
-            if (!value.isTextual() || StringUtils.isBlank(value.asText())) {
+        for (JsonNode item : value) {
+            if (!item.isTextual() || StringUtils.isBlank(item.asText())) {
                 throw new IllegalArgumentException("Create task enum values must be non-blank strings");
             }
-            target.add(value.asText());
+            array.add(item.asText());
         }
+        target.field().set("value", array);
     }
 
     private static ConditionField conditionField(ObjectNode root, String key) {

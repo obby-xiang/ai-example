@@ -250,7 +250,11 @@ class CreateTaskDetailsResumeTest {
     @Test
     void inArraySubmissionResumesWithResolvedElementsIntact() {
         Resolution gap = new CreateTaskReferenceResolver(this::catalog, this.mapper).resolve(IN_ARRAY_ARGUMENTS);
-        seedSubmitted(IN_ARRAY_ARGUMENTS, gap, "{\"enum_value_0_0\":[\"CNY\"]}");
+        PendingToolCall receipt = seedSubmitted(IN_ARRAY_ARGUMENTS, gap, "{\"enum_value_0_0\":[\"CNY\"]}");
+        receipt.setResultText("{\"enum_value_0_0\":[\"CNY\",\"USD\"]}");
+        JsonNode ordered = read(CreateTaskDetailsForm.mergeSubmission(receipt))
+                .path("conditions").path("fields").get(0).path("value");
+        assertThat(ordered).extracting(JsonNode::asText).containsExactly("CNY", "USD");
         when(this.preflight.inspect(eq("create_task"), anyString(), any(AiContext.class)))
                 .thenReturn(passingReport());
 
@@ -262,7 +266,7 @@ class CreateTaskDetailsResumeTest {
         verify(this.preflight).inspect(eq("create_task"), canonical.capture(), any(AiContext.class));
         JsonNode value = read(canonical.getValue()).path("conditions").path("fields").get(0).path("value");
         assertThat(value.isArray()).isTrue();
-        assertThat(value).extracting(JsonNode::asText).containsExactly("USD", "CNY");
+        assertThat(value).extracting(JsonNode::asText).containsExactly("CNY");
         assertThat(this.store.pending(RUN_ID, ORIGINAL_CALL).getArguments()).isEqualTo(canonical.getValue());
         assertThat(this.store.ledger(RUN_ID)).isEmpty();
     }

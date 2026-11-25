@@ -8264,6 +8264,67 @@
           "reason": "15个不同行为方法有预期RED，其中label方法另有Unicode边界RED；最终23个新增/受影响/相邻方法逐个exit 0，五个生产文件IDEA Reformat ok，GREEN实际编译364源且最终compile BUILD SUCCESS，套件、服务日志、真实模型和前端构建NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:c0f1eea48e05292be1754232322aa5aa31c11bb269a5dcd75150b5459dbd589a",
+      "status": "reviewed",
+      "reason": "对最终复审唯一纠正的全部暂存hunk逐一复核：CreateTaskDetailsForm删除defaults与提交值的LinkedHashSet并集，仅按提交顺序复制已验证非空字符串数组；设计和计划同步该当前语义及单项RED/GREEN，测试文件按规范排除，未扩大其他行为。",
+      "reviewedAt": "2026-11-25T11:49:31.564Z",
+      "reviewer": "Kimi Code final re-review targeted correction静态逐hunk自审（按任务要求未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "CREATE_TASK_DETAILS的IN multi_select默认值只初始化控件，验证后的提交非空字符串数组成为完整替换值并保留提交顺序，不再与defaults求并集。",
+          "reason": "最终复审确认FormRenderer会提交完整当前选择，旧并集把取消的USD重新加入并把[CNY,USD]改为[USD,CNY]，违反用户选择。",
+          "impact": "仅CreateTaskDetailsForm.mergeEnumArray及其现有resume单点变化；默认初始化、选项校验、标量、取消、owner、Redis和HITL路径均不变。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/CreateTaskDetailsForm.java",
+          "status": "checked",
+          "reason": "mergeField不再向mergeEnumArray传defaultValue；mergeEnumArray删除集合并集及appendArrayValues，仅逐项验证提交值并顺序写入新ArrayNode，LinkedHashSet/Set无引用import同步移除，已IDEA Reformat。"
+        },
+        {
+          "path": "docs/superpowers/plans/2026-11-25-create-task-structured-references.md",
+          "status": "checked",
+          "reason": "final re-review correction记录默认值只初始化、提交数组权威替换、同一方法顺序和取消默认断言的RED/GREEN及364源编译，未改变运行时NOT_RUN边界。"
+        },
+        {
+          "path": "docs/superpowers/specs/2026-11-25-create-task-structured-references-design.md",
+          "status": "checked",
+          "reason": "现行设计说明由错误的合并不得丢失默认值纠正为提交数组完整替换，追加唯一问题、真实顺序/取消证据及未扩大测试范围。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "仅使用既有Jackson ArrayNode和StringUtils，删除不再需要的JDK集合import，没有新增或升级依赖。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "mergeEnumArray保持低于50行和低复杂度，循环与if保留大括号；新建ArrayNode不共享可变实例，输入只读，废弃helper和Set import直接删除。"
+        },
+        "logging-exception-safety": {
+          "status": "not-affected",
+          "reason": "本批仅调整数组复制与文档，未修改日志、异常消息、捕获、错误响应或敏感信息处理。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "后端现在尊重通用multi_select完整当前选择，取消默认USD不会被复活，提交顺序不被改写；无需修改前端或新增文案。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "仍在同一原创建参数上合并并重新解析后进入预检/HITL，未改变pending身份、取消幂等、Redis、数据库或共享状态协议。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "仅按JsonNode元素顺序复制完整字符串，不做文本截断、字节解码、代理对或SSE分片处理。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "唯一受影响方法先RED（[CNY,USD]实际为[USD,CNY]）后GREEN（1 test、0 failures、0 errors），GREEN实际编译364源且最终compile BUILD SUCCESS；取消未变未复跑，套件、服务、真实模型、前端构建均NOT_RUN。"
+        }
+      }
     }
   ]
 }

@@ -182,10 +182,16 @@ mvn -Dtest=CreateTaskDetailsResumeTest#stillAmbiguousSubmissionStopsBeforeCreate
 
 ## Final fix wave 实施记录（2026-11-25）
 
-- 已修复终审代码项：仅对 `IN` 的枚举字符串数组逐项唯一归一；部分/全部未决数组通过带权威选项和已解析默认值的 `multi_select` 收集完整值，合并时保留已解析元素。标量枚举和非 `IN` 数组的既有处理不变。
+- 已修复终审代码项：仅对 `IN` 的枚举字符串数组逐项唯一归一；部分/全部未决数组通过带权威选项和已解析默认值的 `multi_select` 收集完整值，默认值只初始化控件，验证后的提交数组按提交顺序完整替换。标量枚举和非 `IN` 数组的既有处理不变。
 - `defCodes=[]` 且字段非空时，同卡收集可插入 `defCodes[0]` 的配置引用及字段纠正；多配置且字段非空时按既有单配置条件契约直接 `FAILED`，不再反复收集字段文本。
 - `UnresolvedReference` 新增闭集 `Reason`（`NOT_FOUND/AMBIGUOUS/BLANK/NO_UNIQUE_OWNER/NO_UNIQUE_KEY`）及数组恢复元数据；表单 label 包含有界原引用和按 `ReplyLanguage` 本地化的原因，截断使用字符边界且不拆代理对。目录异常仍为 `FAILED`，不进入纠正表单。
 - 终审指出的 `GenerativeFormRules` purpose 清单、`HostForm` 消费方说明及 `SlotDefinition` 名称/标签精确匹配注释已同步，未改其他注释。
 - 15 个新行为/修正方法先取得预期 RED（另有一次缺失 `Reason` 类型的编译 RED）；最终 23 个新增、变更及相邻回归方法均以独立 Maven 命令 GREEN，每次 `Tests run: 1, Failures: 0, Errors: 0`。未执行测试类、套件或循环。
 - 五个生产文件均执行 IDEA Reformat Code 并返回 `ok`；本波 GREEN 实际编译 364 个生产源，最终 `mvn -o -DskipTests compile` 为 `BUILD SUCCESS`（源码已最新）。精确命令和输出摘要见 `final-fix-report.md`。
 - 本波无前端文件变化，前端构建 `NOT_RUN`。Task 3 Step 2b 启动/日志门禁及 Step 3 真实模型验收仍为 `NOT_RUN`，仍由控制器保留；本波未启动/重启服务、未调用模型。
+
+### Final re-review correction（2026-11-25）
+
+- 纠正 `mergeEnumArray` 将 defaults 置于提交值之前的错误并集：defaults 仍仅作初始 UI 选择，回灌的非空字符串数组是唯一权威完整值，保留提交顺序并允许取消默认项。
+- `CreateTaskDetailsResumeTest#inArraySubmissionResumesWithResolvedElementsIntact` 改为锁定 `[CNY,USD]` 提交顺序及默认 `USD` 被 `[CNY]` 取消；同一方法先 RED（实际 `[USD,CNY]`）后 GREEN（1 test、0 failures、0 errors），GREEN 实际编译 364 个生产源。取消路径未变，未额外运行取消方法。
+- `CreateTaskDetailsForm.java` 已再次 IDEA Reformat 并返回 `ok`。精确输出与后续门禁见 `final-fix-report.md` 的 correction 记录；运行时与真实模型状态不变。
