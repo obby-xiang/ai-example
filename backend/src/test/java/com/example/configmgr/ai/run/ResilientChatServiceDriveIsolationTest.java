@@ -5,10 +5,8 @@ import com.example.configmgr.ai.config.AiProviderRegistry;
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
-import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
-import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
 import com.example.configmgr.ai.tenant.TenantUser;
 import com.example.configmgr.ai.tool.AiContext;
@@ -19,7 +17,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
@@ -89,9 +86,7 @@ class ResilientChatServiceDriveIsolationTest {
 	private final AiProviderRegistry providerRegistry = mock(AiProviderRegistry.class);
 
 	private final ProviderRuntime runtime = new ProviderRuntime(null, "test-provider", "test-model",
-			"http://localhost", "/chat/completions", "test|runtime",
-			org.springframework.ai.openai.OpenAiChatOptions.builder().model("test-model").build(), null,
-			this.chatModel, this.chatClient);
+			"http://localhost", "/chat/completions", "test|runtime", null, null, this.chatModel, this.chatClient);
 
 	private final ChatMemory chatMemory = mock(ChatMemory.class);
 
@@ -170,25 +165,6 @@ class ResilientChatServiceDriveIsolationTest {
 		}
 
 		assertThat(as(A, () -> this.service.isDriving(RUN_ID))).as("轮末摘除本身份的登记").isFalse();
-	}
-
-	@Test
-	void firstTurnPassesCurrentRuntimeOnlyThroughInMemoryToolContext() throws Exception {
-		try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(A.tenantId(), A.userId())) {
-			SseChatEmitter out = this.registry.of(RUN_ID);
-			FrameWire wire = FrameWire.attachTo(out);
-			as(A, () -> {
-				this.service.chat(RUN_ID, new AiChatRequest(SESSION_ID, "你好", null, null, null), out);
-				return null;
-			});
-			@SuppressWarnings("unchecked")
-			ArgumentCaptor<java.util.Map<String, Object>> context = ArgumentCaptor.forClass(java.util.Map.class);
-			org.mockito.Mockito.verify(this.requestSpec).toolContext(context.capture());
-			assertThat(context.getValue()).containsEntry(SpToolCallingManager.TOOL_CONTEXT_PROVIDER_RUNTIME, this.runtime);
-			assertThat(this.mapper.writeValueAsString(this.store.get(RUN_ID)))
-				.doesNotContain("turnProviderRuntime", "test|runtime");
-			assertThat(this.mapper.writeValueAsString(wire.frames())).doesNotContain("turnProviderRuntime", "test|runtime");
-		}
 	}
 
 	private AiProperties properties() {

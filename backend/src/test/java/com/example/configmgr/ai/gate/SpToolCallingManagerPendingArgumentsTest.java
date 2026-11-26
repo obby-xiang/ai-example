@@ -1,7 +1,6 @@
 package com.example.configmgr.ai.gate;
 
 import com.example.configmgr.ai.config.AiProperties;
-import com.example.configmgr.ai.form.CreateTaskDetailsForm;
 import com.example.configmgr.ai.form.TaskTypeForm;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -202,7 +201,35 @@ class SpToolCallingManagerPendingArgumentsTest {
     }
 
     @Test
-    void createTaskResolutionIsComputedOnceAndPassedToDetailsForm() {
+    void unresolvedCreateTaskPreventsAnyOtherActionInBatch() {
+        installResolver(() -> List.of(currencySlot()));
+        String unresolved = "{\"type\":\"EXPORT\",\"defCodes\":[\"未知字典\"],\"conditions\":{}}";
+        String valid = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{}}";
+        when(this.preflightProbe.inspect(eq("create_task"), eq(valid), any(AiContext.class)))
+                .thenReturn(new ToolPreflightService.PreflightReport(true, Map.of("type", "EXPORT"), List.of(),
+                        "valid", "", null, "valid-report"));
+        when(this.gate.awaitDecision(anyString(), any(PendingToolCall.class))).thenAnswer(invocation -> {
+            PendingToolCall pending = invocation.getArgument(1);
+            pending.setStatus(PendingToolCall.REJECTED);
+            return pending;
+        });
+
+        executeCalls(new AssistantMessage.ToolCall("call-unresolved", "function", "create_task", unresolved),
+                new AssistantMessage.ToolCall("call-valid", "function", "create_task", valid));
+
+        verifyNoInteractions(this.preflightProbe);
+        verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+        ArgumentCaptor<PendingToolCall> captor = ArgumentCaptor.forClass(PendingToolCall.class);
+        verify(this.store, atLeastOnce()).putPending(eq("run-pending-arguments"), captor.capture());
+        assertThat(captor.getAllValues()).filteredOn(entry -> "call-valid".equals(entry.getToolCallId()))
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.getStatus()).isEqualTo(PendingToolCall.SKIPPED);
+                    assertThat(entry.isExecuted()).isFalse();
+                });
+    }
+
+    @Test
+    void unresolvedCreateTaskIsBlockedWithoutCompensationForm() {
         CreateTaskReferenceResolver resolver = mock(CreateTaskReferenceResolver.class);
         String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"未知字典\"],\"conditions\":{}}";
         CreateTaskReferenceResolver.Resolution unresolved = new CreateTaskReferenceResolver.Resolution(
@@ -211,17 +238,14 @@ class SpToolCallingManagerPendingArgumentsTest {
                                 0, -1, "未知字典", List.of())),
                 CreateTaskReferenceResolver.UNRESOLVED_CODE);
         when(resolver.resolve(original)).thenReturn(unresolved);
-        CreateTaskDetailsForm detailsForm = mock(CreateTaskDetailsForm.class);
         ReflectionTestUtils.setField(this.manager, "createTaskReferenceResolver", resolver);
-        this.manager.setCreateTaskDetailsForm(detailsForm);
 
         execute(original);
 
         verify(resolver).resolve(original);
-        verify(detailsForm).parkIfUnresolved(eq("run-pending-arguments"), eq("call-create"), eq(original),
-                eq(unresolved), anyList(), anyString(), any());
         verifyNoInteractions(this.preflightProbe);
         assertThat(capturedPending().getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
+        assertThat(capturedPending().getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
     }
 
     @Test
@@ -335,9 +359,8 @@ class SpToolCallingManagerPendingArgumentsTest {
         pending.setToolCallId("call-create");
         pending.setName("create_task");
         pending.setArguments(arguments);
-        Prompt prompt = new Prompt(List.of(new UserMessage(userText)));
         ReflectionTestUtils.invokeMethod(this.manager, "bindPendingArguments", "run-pending-arguments", AiContext.empty(),
-                prompt, null, List.of(pending));
+                List.of(pending));
         return pending;
     }
 

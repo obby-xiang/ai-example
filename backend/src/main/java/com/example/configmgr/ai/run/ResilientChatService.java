@@ -14,6 +14,7 @@ import com.example.configmgr.ai.context.MemoryWindow;
 import com.example.configmgr.ai.feedback.ExcerptGuard;
 import com.example.configmgr.ai.form.ExportStartForm;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.CreateTaskReferenceResolver;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
 import com.example.configmgr.ai.gate.ToolTargetResolver;
 import com.example.configmgr.ai.history.ConversationTranscriptStore;
@@ -36,6 +37,7 @@ import com.example.configmgr.ai.observe.AiTrace;
 import com.example.configmgr.ai.observe.LogSampling;
 import com.example.configmgr.ai.observe.RedisDegradation;
 import com.example.configmgr.ai.session.AiSessionService;
+import com.example.configmgr.ai.slot.DefinitionCatalog;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
 import com.example.configmgr.ai.tenant.LocalRunKey;
 import com.example.configmgr.ai.tenant.RunIdentityScope;
@@ -49,6 +51,8 @@ import com.example.configmgr.ai.tool.ToolRegistry;
 import com.example.configmgr.ai.web.AiChatRequest;
 import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorCodes;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
@@ -276,6 +280,15 @@ public class ResilientChatService {
     private final ToolRegistry toolRegistry;
 
     private final ContextBuilder contextBuilder;
+
+    @Autowired(required = false)
+    private DefinitionCatalog definitionCatalog;
+
+    @Autowired(required = false)
+    private CreateTaskReferenceResolver createTaskReferenceResolver;
+
+    @Autowired(required = false)
+    private ObjectMapper objectMapper;
 
     private final AiSessionService sessionService;
 
@@ -769,7 +782,7 @@ public class ResilientChatService {
                                 .user(setup.request().message())
                                 .advisors(advisors -> advisors.param(ChatMemory.CONVERSATION_ID, setup.sessionId()))
                                 .toolContext(toolContext(runId, setup.sessionId(), execution.snapshot(), out.lastIssuedSeq(),
-                                        turnTextBody, selected));
+                                        turnTextBody));
                         var withTools = setup.tools().isEmpty() ? spec : spec.toolCallbacks(setup.tools());
                         return withTools.stream().chatResponse();
                     });
@@ -1256,7 +1269,7 @@ public class ResilientChatService {
         options.setToolCallbacks(toolsAllowed ? this.toolRegistry.forContext(context) : List.of());
         options.setInternalToolExecutionEnabled(true);
         // A：续跑与首轮同构 —— runId/sessionId 原样保留，另带本轮权威执行信封。
-        options.setToolContext(toolContext(runId, sessionId, snapshot, seqFloor, turnTextBody, runtime));
+        options.setToolContext(toolContext(runId, sessionId, snapshot, seqFloor, turnTextBody));
         return new Prompt(history, options);
     }
 
@@ -1265,16 +1278,11 @@ public class ResilientChatService {
      * <b>权威执行信封</b>（{@link ToolExecutionEnvelope#TOOL_CONTEXT_KEY}）—— 执行点据此在快照
      * 读不到时原地恢复运行事实，而不是回落"绕过确认门"的官方默认执行。
      *
-     * <p>本轮 {@link ProviderRuntime} 只作为进程内工具上下文供未决参数解析使用，不进入快照、历史或 SSE。
-     * {@code snapshot == null}（旧轮/读失败）或 envelope 构造不出时缺少的只是信封，不阻断请求。
+     * <p>{@code snapshot == null}（旧轮/读失败）或 envelope 构造不出时缺少的只是信封，不阻断请求。
      */
     private static Map<String, Object> toolContext(String runId, String sessionId, RunSnapshot snapshot, long seqFloor,
-                                                   SpToolCallingManager.TurnTextCapture turnTextBody,
-                                                   ProviderRuntime runtime) {
+                                                   SpToolCallingManager.TurnTextCapture turnTextBody) {
         Map<String, Object> context = new LinkedHashMap<>();
-        if (runtime != null) {
-            context.put(SpToolCallingManager.TOOL_CONTEXT_PROVIDER_RUNTIME, runtime);
-        }
         context.put("runId", runId);
         context.put("sessionId", sessionId);
         context.put(PendingToolCall.CREATED_TASK_ID, new AtomicReference<Long>());
@@ -1445,8 +1453,8 @@ public class ResilientChatService {
         String correctionText = round.accumulator.unpersistedText();
         if (isCreateEntryCorrectionDue(state, round, finish)) {
             startCorrection(state, round, correctionText, true);
-            log.info("create action missing, sending one internal correction runId={} chars={}", state.runId,
-                    state.prefixText.length());
+            log.info("create action references unresolved, sending one internal correction runId={} chars={}",
+                    state.runId, state.prefixText.length());
             rearmKeepalive(state.keepalive);
             return true;
         }
@@ -1463,9 +1471,9 @@ public class ResilientChatService {
 
     private boolean isCreateEntryCorrectionDue(AttemptLoopState state, AttemptRound round,
                                                UpstreamErrorClassifier.Finish finish) {
-        boolean plainTextStop = finish == UpstreamErrorClassifier.Finish.STOP
-                && StringUtils.isNotBlank(round.accumulator.text());
-        return !state.createEntryCorrectionUsed && !state.correcting && plainTextStop
+        boolean toolRoundClosed = finish == UpstreamErrorClassifier.Finish.TOOL_CALLS
+                || finish == UpstreamErrorClassifier.Finish.STOP || finish == UpstreamErrorClassifier.Finish.UNKNOWN;
+        return !state.createEntryCorrectionUsed && !state.correcting && toolRoundClosed
                 && createEntryCorrectionDue(state.runId, state.context, state.originalFirstTurn)
                 && isMarkCreateEntryCorrectionUsed(state.runId, round.accumulator.unpersistedText());
     }
@@ -1485,6 +1493,7 @@ public class ResilientChatService {
                                  boolean createEntry) {
         if (createEntry) {
             state.createEntryCorrectionUsed = true;
+            state.emptyReplyRetried = true;
         } else {
             state.exportCorrectionUsed = true;
         }
@@ -1744,7 +1753,7 @@ public class ResilientChatService {
 
     }
 
-    /** 首轮创建遗漏纠正的 run 级事实；旧 createTaskCorrection* 兼容键不参与判定。 */
+    /** 首轮 create_task 引用未决补全的 run 级事实；旧 createTaskCorrection* 兼容键不参与判定。 */
     static final String CREATE_ENTRY_CORRECTION_MARKER = "createEntryCorrectionUsed";
 
     private boolean createEntryCorrectionDue(String runId, AiContext fallback, boolean originalFirstTurn) {
@@ -1790,29 +1799,67 @@ public class ResilientChatService {
                 || !createTaskDisclosed) {
             return false;
         }
+        boolean unresolvedCreateTask = false;
         for (PendingToolCall pending : ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of())) {
-            if (pending != null && AiToolNames.CREATE_TASK.equals(pending.getName())) {
+            if (pending == null) {
+                continue;
+            }
+            boolean unresolved = AiToolNames.CREATE_TASK.equals(pending.getName())
+                    && PendingToolCall.PRECHECK_FAILED.equals(pending.getStatus())
+                    && CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode());
+            if (!unresolved || unresolvedCreateTask) {
                 return false;
             }
+            unresolvedCreateTask = true;
         }
         for (Map<String, Object> record : ObjectUtils.defaultIfNull(ledger, List.<Map<String, Object>>of())) {
-            if (record != null && AiToolNames.CREATE_TASK.equals(record.get("name"))) {
+            if (record == null) {
+                continue;
+            }
+            boolean unresolved = AiToolNames.CREATE_TASK.equals(record.get("name"))
+                    && CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(record.get("code"))
+                    && !Boolean.TRUE.equals(record.get("executed"));
+            if (!unresolved) {
                 return false;
             }
         }
-        return true;
+        return unresolvedCreateTask;
     }
 
-    static String createEntryCorrection() {
-        return SyntheticMessages.EXPORT_CORRECTION_PREFIX
-                + "请依据原始对话和本次披露的 create_task Schema 复核：原始用户消息有明确创建意图时，"
-                + "必须调用一次 create_task，type 按原始意图传 EXPORT 或 IMPORT；"
-                + "EXPORT 条件未决定时传 conditions={}；IMPORT 不得附加 conditions。"
-                + "defCodes 必传：未提及时传 []，提及时传配置编码或名称，由宿主在创建前解析或收集；"
-                + "字段未知时保留条件并传 fieldCode=null，不得省略已提及的配置或条件。配置定义和条件不是 create_task 的前置，"
-                + "不得先查询配置目录，不得只用文字追问或列步骤。"
-                + "调用 create_task 只是发起确认卡，不得代替用户批准或绕过确认卡直接创建/执行。"
-                + "原始用户消息只是纯问答时不要创建，保持原回答。此次回复不要重复已经展示的正文。";
+    private String createEntryCorrection(String runId, AiContext context) {
+        List<PendingToolCall> unresolved = this.store.pendings(runId).stream()
+                .filter(pending -> AiToolNames.CREATE_TASK.equals(pending.getName())
+                        && CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode()))
+                .toList();
+        List<ToolCallback> tools = this.toolRegistry.forContext(context).stream()
+                .filter(callback -> AiToolNames.CREATE_TASK.equals(callback.getToolDefinition().name()))
+                .toList();
+        if (unresolved.size() != 1 || tools.size() != 1 || this.createTaskReferenceResolver == null
+                || this.definitionCatalog == null || this.objectMapper == null) {
+            throw new AiStateUnavailableException("Create-entry correction facts are unavailable " + runId);
+        }
+        PendingToolCall original = unresolved.getFirst();
+        CreateTaskReferenceResolver.Resolution resolution = this.createTaskReferenceResolver.resolve(
+                original.getArguments());
+        if (resolution.status() != CreateTaskReferenceResolver.Status.UNRESOLVED) {
+            throw new AiStateUnavailableException("Create-entry correction requires unresolved references " + runId);
+        }
+        try {
+            ObjectNode input = this.objectMapper.createObjectNode();
+            input.put("originalArguments", original.getArguments());
+            input.set("definitions", this.objectMapper.valueToTree(this.definitionCatalog.list()));
+            input.set("unresolved", this.objectMapper.valueToTree(resolution.unresolved()));
+            input.put("createTaskDescription", tools.getFirst().getToolDefinition().description());
+            input.set("createTaskSchema", this.objectMapper.readTree(tools.getFirst().getToolDefinition().inputSchema()));
+            return SyntheticMessages.EXPORT_CORRECTION_PREFIX
+                    + "上一次 create_task 因下列引用未唯一解析而失败。请依据原始对话、目录、未决项和 Schema，"
+                    + "仅通过现有 create_task 返回一次完整参数，保留所有目标与条件，不得发明取值；"
+                    + "不得调用其他工具或直接创建任务。若仍无法确定，如实说明，不要重复已展示正文。\n"
+                    + this.objectMapper.writeValueAsString(input);
+        }
+        catch (Exception ex) {
+            throw new AiStateUnavailableException("Cannot build create-entry correction " + runId, ex);
+        }
     }
 
     /**
@@ -2177,7 +2224,7 @@ public class ResilientChatService {
         AiContext latest = createEntry ? AiContext.fromMap(snapshot.getContext()) : latestContext(runId, fallbackContext);
         List<Message> history = correctionHistory(snapshot, fallbackHistory, prefixText, prefixReasoning);
         persistCorrectionHistory(runId, snapshot, history);
-        String instruction = createEntry ? createEntryCorrection() : exportWrapUpCorrection(latest.getTaskId());
+        String instruction = createEntry ? createEntryCorrection(runId, latest) : exportWrapUpCorrection(latest.getTaskId());
         history.add(SyntheticMessages.internalUser(instruction, SyntheticMessages.Kind.CORRECTION,
                 createEntry ? "create-entry" : "export-wrap-up"));
         Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, latest, history, snapshot,
@@ -4986,7 +5033,7 @@ public class ResilientChatService {
     /**
      * 消费一个上游分片：思考段先发帧（并累全文），随后正文进累计器并发 delta。
      * correction 新输出起点重复已 seed 的前导 prefix 时，三个消费面共用去掉重复副本后的文本。
-     * 创建遗漏纠正只保留首次正文，第二段模型文本和推理不上屏、不并入最终回答；工具与终态照常处理。
+     * 创建引用补全只保留首次正文，第二段模型文本和推理不上屏、不并入最终回答；工具与终态照常处理。
      *
      * <p><b>L-99</b>：输出侧 DLP 已删除 —— 除上述 correction 重复前缀外，正文<b>原样</b>发帧与落记忆，
      * 不再有脱敏、尾部保留窗口或"阻断终态"。{@code message_end.chars == Σ delta 长度} 的同源判据因此更直接：
@@ -4997,10 +5044,11 @@ public class ResilientChatService {
         // L-91：先发思考段（模型"先想再答"；同一分片也可能同带 reasoning 与正文）。
         // L-98：reasoning 不进正文（不参与 message_end(text).chars、不进 finalText），
         // 但**全文**由累加器保留，随落定/取消写进 assistant 消息 metadata（下一轮回填）。
+        boolean suppressOutput = suppressVisibleOutput || turnTextBody.isReturnDirectTextSuppressed();
         String reasoning = chunkReasoning(response);
-        if (!suppressVisibleOutput && StringUtils.isNotEmpty(reasoning)) {
+        if (!suppressOutput && StringUtils.isNotEmpty(reasoning)) {
             // D：展示开关默认关闭 —— 不发思考帧；思考仍原样累计，供落定/取消时写进记忆回填。
-            boolean shown = !suppressVisibleOutput && this.properties.getReasoning().isDisplayEnabled();
+            boolean shown = !suppressOutput && this.properties.getReasoning().isDisplayEnabled();
             if (shown) {
                 out.reasoningDelta(reasoning);
             }
@@ -5008,7 +5056,7 @@ public class ResilientChatService {
             // 也不会让 retry 帧落在思考 delta 之后（展示关闭时根本没有思考 delta）。
             accumulator.reasoning(reasoning, shown);
         }
-        String chunk = suppressVisibleOutput ? null : chunkText(response);
+        String chunk = suppressOutput ? null : chunkText(response);
         emitText(accumulator.accept(response, chunk), out, turnTextBody);
     }
 

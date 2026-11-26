@@ -4,7 +4,6 @@ import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.ai.config.AiProperties;
-import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.context.CompactionFuse;
 import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextLimitResolver;
@@ -24,7 +23,6 @@ import com.example.configmgr.ai.history.TranscriptEntry;
 import com.example.configmgr.ai.form.ConditionsForm;
 import com.example.configmgr.ai.form.FormIssue;
 import com.example.configmgr.ai.history.SyntheticMessages;
-import com.example.configmgr.ai.intent.ActionIntentParser;
 import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.ReasoningOrigin;
@@ -245,8 +243,6 @@ public class SpToolCallingManager implements ToolCallingManager {
      */
     private static final int TOOL_TIMEOUT_THREADS_DEFAULT = 20;
 
-    private static final Duration INTENT_FALLBACK_TIMEOUT = Duration.ofSeconds(30);
-
     private static final RunIdentityScope.Scope NO_RECORD_SCOPE = () -> {
     };
 
@@ -466,20 +462,6 @@ public class SpToolCallingManager implements ToolCallingManager {
     @Autowired(required = false)
     public void setCreateTaskReferenceResolver(CreateTaskReferenceResolver resolver) {
         this.createTaskReferenceResolver = resolver;
-    }
-
-    private ActionIntentParser actionIntentParser;
-
-    @Autowired(required = false)
-    public void setActionIntentParser(ActionIntentParser parser) {
-        this.actionIntentParser = parser;
-    }
-
-    private com.example.configmgr.ai.form.CreateTaskDetailsForm createTaskDetailsForm;
-
-    @Autowired(required = false)
-    public void setCreateTaskDetailsForm(com.example.configmgr.ai.form.CreateTaskDetailsForm form) {
-        this.createTaskDetailsForm = form;
     }
 
     public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
@@ -729,8 +711,6 @@ public class SpToolCallingManager implements ToolCallingManager {
      */
     public static final String TOOL_CONTEXT_REPLY_LOCALE = "replyLocale";
 
-    public static final String TOOL_CONTEXT_PROVIDER_RUNTIME = "turnProviderRuntime";
-
     /**
      * 本轮<b>当前 attempt 已聚合正文与推理段</b>的传播键：{@code ResilientChatService} 的累加器每消费一个
      * 正文或推理分片就追加到同一个 {@link TurnTextCapture}，本类在工具执行点读取，补全流式工具调用跳那条
@@ -764,6 +744,8 @@ public class SpToolCallingManager implements ToolCallingManager {
 
         private RunParkedException parked;
 
+        private boolean returnDirectTextSuppressed;
+
         private Runnable pendingSegmentFlush;
 
         /**
@@ -773,6 +755,7 @@ public class SpToolCallingManager implements ToolCallingManager {
             this.segment.setLength(0);
             this.reasoningSegment.setLength(0);
             this.parked = null;
+            this.returnDirectTextSuppressed = false;
             this.pendingSegmentFlush = null;
             if (StringUtils.isNotEmpty(segment)) {
                 this.segment.append(segment);
@@ -839,6 +822,14 @@ public class SpToolCallingManager implements ToolCallingManager {
 
         public synchronized RunParkedException parked() {
             return this.parked;
+        }
+
+        public synchronized void suppressReturnDirectText() {
+            this.returnDirectTextSuppressed = true;
+        }
+
+        public synchronized boolean isReturnDirectTextSuppressed() {
+            return this.returnDirectTextSuppressed;
         }
 
     }
@@ -937,7 +928,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         List<PendingToolCall> pendings = newPendings(assistant);
         AiContext context = AiContext.fromMap(snapshot.getContext());
         Map<String, CreateTaskReferenceResolver.Resolution> createTaskResolutions = bindPendingArguments(runId, context,
-                prompt, assistant, pendings);
+                pendings);
         ModelWriteBudget modelBudget = modelWriteBudget(snapshot, prompt, assistant, pendings.size());
         boolean budgetArmed = this.beacon.isBudgetArmed(runId);
         if (budgetArmed) {
@@ -961,13 +952,10 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private Map<String, CreateTaskReferenceResolver.Resolution> bindPendingArguments(String runId, AiContext context,
-                                                                                    Prompt prompt,
-                                                                                    AssistantMessage assistant,
                                                                                     List<PendingToolCall> pendings) {
         Map<String, CreateTaskReferenceResolver.Resolution> resolutions = new LinkedHashMap<>();
         for (PendingToolCall pending : pendings) {
-            CreateTaskReferenceResolver.Resolution resolution = resolveCreateTaskReferences(runId, pending, prompt,
-                    pendings.size());
+            CreateTaskReferenceResolver.Resolution resolution = resolveCreateTaskReferences(runId, pending);
             if (resolution != null) {
                 resolutions.put(pending.getToolCallId(), resolution);
             }
@@ -979,21 +967,19 @@ public class SpToolCallingManager implements ToolCallingManager {
         return resolutions;
     }
 
-    private CreateTaskReferenceResolver.Resolution resolveCreateTaskReferences(String runId, PendingToolCall pending,
-                                                                               Prompt prompt, int batchSize) {
+    private CreateTaskReferenceResolver.Resolution resolveCreateTaskReferences(String runId, PendingToolCall pending) {
         if (!TOOL_CREATE_TASK.equals(pending.getName())
                 || com.example.configmgr.ai.form.TaskTypeForm.typeMissingOrInvalid(pending.getArguments())) {
             return null;
         }
         if (this.createTaskReferenceResolver == null) {
-            CreateTaskReferenceResolver.Resolution resolution = failedIntentResolution(pending);
+            CreateTaskReferenceResolver.Resolution resolution = new CreateTaskReferenceResolver.Resolution(
+                    CreateTaskReferenceResolver.Status.FAILED, pending.getArguments(), List.of(),
+                    CreateTaskReferenceResolver.FAILED_CODE);
             blockCreateTaskReferences(runId, pending, resolution);
             return resolution;
         }
         CreateTaskReferenceResolver.Resolution resolution = this.createTaskReferenceResolver.resolve(pending.getArguments());
-        if (resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED && batchSize == 1) {
-            resolution = resolveUnresolvedCreateTask(runId, pending, prompt, resolution);
-        }
         if (resolution.status() == CreateTaskReferenceResolver.Status.RESOLVED) {
             pending.setArguments(resolution.canonicalArguments());
         }
@@ -1003,73 +989,6 @@ public class SpToolCallingManager implements ToolCallingManager {
         return resolution;
     }
 
-    private CreateTaskReferenceResolver.Resolution resolveUnresolvedCreateTask(String runId, PendingToolCall pending,
-                                                                               Prompt prompt,
-                                                                               CreateTaskReferenceResolver.Resolution original) {
-        if (this.actionIntentParser == null) {
-            return original;
-        }
-        ProviderRuntime runtime = providerRuntimeOf(prompt);
-        ToolDefinition definition = toolDefinitionOf(prompt, TOOL_CREATE_TASK);
-        String userText = lastRealUserText(prompt);
-        if (runtime == null || definition == null || StringUtils.isBlank(userText)) {
-            return failedIntentResolution(pending);
-        }
-        ActionIntentParser.Request request = new ActionIntentParser.Request(userText, definition, pending.getArguments());
-        ActionIntentParser.Result parsed = callIntentParser(request, runtime, runId);
-        if (parsed.status() != ActionIntentParser.Status.PARSED || parsed.plan() == null
-                || parsed.plan().actions().size() != 1) {
-            return failedIntentResolution(pending);
-        }
-        String arguments = parsed.plan().actions().getFirst().arguments().toString();
-        CreateTaskReferenceResolver.Resolution resolved = this.createTaskReferenceResolver.resolve(arguments);
-        return resolved.status() == CreateTaskReferenceResolver.Status.UNRESOLVED
-                ? failedIntentResolution(pending) : resolved;
-    }
-
-    private ActionIntentParser.Result callIntentParser(ActionIntentParser.Request request, ProviderRuntime runtime,
-                                                       String runId) {
-        Duration configured = this.properties.getTool().getExecTimeout();
-        Duration timeout = configured == null || configured.isZero() || configured.isNegative()
-                ? INTENT_FALLBACK_TIMEOUT : configured;
-        try {
-            return executeBounded(() -> this.actionIntentParser.parse(request, runtime), timeout, TOOL_CREATE_TASK,
-                    "action-intent", runId);
-        }
-        catch (ToolExecutionTimeoutException | ToolExecutorSaturatedException ex) {
-            log.warn("action intent parsing did not complete within its bounded execution", ex);
-            return new ActionIntentParser.Result(ActionIntentParser.Status.FAILED, null,
-                    ActionIntentParser.MODEL_CALL_FAILED);
-        }
-    }
-
-    private static CreateTaskReferenceResolver.Resolution failedIntentResolution(PendingToolCall pending) {
-        return new CreateTaskReferenceResolver.Resolution(CreateTaskReferenceResolver.Status.FAILED,
-                pending.getArguments(), List.of(), CreateTaskReferenceResolver.FAILED_CODE);
-    }
-
-    private static String lastRealUserText(Prompt prompt) {
-        return prompt.getInstructions().stream()
-                .filter(message -> message instanceof UserMessage && !SyntheticMessages.isSynthetic(message))
-                .reduce((first, second) -> second).map(Message::getText).orElse(null);
-    }
-
-    private static ToolDefinition toolDefinitionOf(Prompt prompt, String name) {
-        if (!(prompt.getOptions() instanceof ToolCallingChatOptions options)
-                || CollectionUtils.isEmpty(options.getToolCallbacks())) {
-            return null;
-        }
-        return options.getToolCallbacks().stream().filter(callback -> callback != null
-                        && name.equals(callback.getToolDefinition().name()))
-                .map(ToolCallback::getToolDefinition).findFirst().orElse(null);
-    }
-
-    private ProviderRuntime providerRuntimeOf(Prompt prompt) {
-        Map<String, Object> context = toolContextOf(prompt);
-        Object runtime = context == null ? null : context.get(TOOL_CONTEXT_PROVIDER_RUNTIME);
-        return runtime instanceof ProviderRuntime selected ? selected : null;
-    }
-
     private static boolean isCreateTaskReferenceBlocked(PendingToolCall pending) {
         return CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode())
                 || CreateTaskReferenceResolver.FAILED_CODE.equals(pending.getCode());
@@ -1077,6 +996,17 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private void prepareBatch(ToolBatchState state, List<PendingToolCall> pendings,
                               Map<String, CreateTaskReferenceResolver.Resolution> createTaskResolutions) {
+        PendingToolCall unresolved = pendings.stream().filter(pending -> {
+            CreateTaskReferenceResolver.Resolution resolution = createTaskResolutions.get(pending.getToolCallId());
+            return resolution != null && resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED;
+        }).findFirst().orElse(null);
+        if (unresolved != null) {
+            CreateTaskReferenceResolver.Resolution resolution = createTaskResolutions.get(unresolved.getToolCallId());
+            blockCreateTaskReferencesIfDue(state, unresolved, resolution);
+            state.preflightBlocked.add(unresolved.getToolCallId());
+            state.haltedBy = unresolved;
+            return;
+        }
         for (PendingToolCall pending : pendings) {
             preparePending(state, pending, pendings.size(), createTaskResolutions.get(pending.getToolCallId()));
         }
@@ -1084,7 +1014,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private void preparePending(ToolBatchState state, PendingToolCall pending, int batchSize,
                                 CreateTaskReferenceResolver.Resolution createTaskResolution) {
-        parkCreateTaskDetailsIfDue(state, pending, batchSize, createTaskResolution);
+        blockCreateTaskReferencesIfDue(state, pending, createTaskResolution);
         parkTaskTypeIfDue(state, pending, batchSize);
         if (isConditionRejected(state, pending, batchSize) || isPreflightBlocked(state, pending)
                 || isCreateTaskBlocked(state, pending) || isFrontendSkipped(state, pending)) {
@@ -1093,32 +1023,11 @@ public class SpToolCallingManager implements ToolCallingManager {
         state.suspended.add(pending);
     }
 
-    private void parkCreateTaskDetailsIfDue(ToolBatchState state, PendingToolCall pending, int batchSize,
-                                            CreateTaskReferenceResolver.Resolution resolution) {
-        if (resolution == null || resolution.status() != CreateTaskReferenceResolver.Status.UNRESOLVED) {
-            return;
+    private void blockCreateTaskReferencesIfDue(ToolBatchState state, PendingToolCall pending,
+                                                CreateTaskReferenceResolver.Resolution resolution) {
+        if (resolution != null && resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED) {
+            blockCreateTaskReferences(state.runId, pending, resolution);
         }
-        boolean eligible = !state.budgetArmed && batchSize == 1 && this.createTaskDetailsForm != null
-                && PendingToolCall.KIND_CONFIRM.equals(pending.getKind());
-        if (eligible && parkCreateTaskDetails(state, pending, resolution)) {
-            throw new RunParkedException(state.runId,
-                    com.example.configmgr.ai.form.CreateTaskDetailsForm.toolCallId(pending.getToolCallId()),
-                    PendingToolCall.KIND_FRONTEND);
-        }
-        blockCreateTaskReferences(state.runId, pending, resolution);
-    }
-
-    private boolean parkCreateTaskDetails(ToolBatchState state, PendingToolCall pending,
-                                          CreateTaskReferenceResolver.Resolution resolution) {
-        List<Message> detailsHistory = new ArrayList<>(state.prompt.getInstructions());
-        String assistantBody = StringUtils.defaultString(state.assistant.getText());
-        boolean parked = this.createTaskDetailsForm.parkIfUnresolved(state.runId, pending.getToolCallId(),
-                pending.getArguments(), resolution, detailsHistory, assistantBody, state.assistant.getMetadata());
-        if (parked) {
-            commitTurnText(state.prompt);
-            recordParkedHostFormTranscript(state.runId, state.prompt, state.assistant);
-        }
-        return parked;
     }
 
     private void parkTaskTypeIfDue(ToolBatchState state, PendingToolCall pending, int batchSize) {
@@ -1356,6 +1265,11 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private void executePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
+        if (state.preflightBlocked.contains(pending.getToolCallId())
+                && CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode())) {
+            addPreflightBlockedResponse(state, pending);
+            return;
+        }
         if (isCreatePrerequisiteReadTool(pending.getName()) && isCreateTaskAwaitingExecution(state.runId)) {
             emitToolStartOnce(state.runId, state.toolStarted, pending);
             state.responses.add(skipAsReadBeforeCreate(state.runId, pending));
@@ -1603,7 +1517,14 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
         List<Message> nextModelHistory = CorrectionPrefixes.historyWithSingleCorrectionPrefix(budget.modelHistory(),
                 CorrectionPrefixes.correctionPrefix(state.snapshot));
-        return ToolExecutionResult.builder().conversationHistory(nextModelHistory).build();
+        boolean unresolvedCreateTask = pendings.stream().anyMatch(pending ->
+                CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode()));
+        TurnTextCapture turnText = turnTextOf(state.prompt);
+        if (unresolvedCreateTask && turnText != null) {
+            turnText.suppressReturnDirectText();
+        }
+        return ToolExecutionResult.builder().conversationHistory(nextModelHistory)
+                .returnDirect(unresolvedCreateTask).build();
     }
 
     private final class ToolBatchState {
@@ -3992,122 +3913,6 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     // ── 辅助 ────────────────────────────────────────────────────────────────
-
-    public enum CreateTaskDetailsResumeStatus {
-        NOT_APPLICABLE, PARKED, UNRESOLVED, SETTLED
-    }
-
-    public record CreateTaskDetailsResume(CreateTaskDetailsResumeStatus status, String mergedArguments,
-                                           CreateTaskReferenceResolver.Resolution resolution, PendingToolCall createTask) {
-        private static CreateTaskDetailsResume notApplicable() {
-            return new CreateTaskDetailsResume(CreateTaskDetailsResumeStatus.NOT_APPLICABLE, null, null, null);
-        }
-    }
-
-    public CreateTaskDetailsResume resumeCreateTaskDetails(String runId, AiContext context, List<Message> history,
-                                                           PendingToolCall form) {
-        if (!com.example.configmgr.ai.form.CreateTaskDetailsForm.isCreateTaskDetails(form)
-                || !PendingToolCall.FRONTEND_RESULT.equals(form.getStatus())) {
-            return CreateTaskDetailsResume.notApplicable();
-        }
-        String merged = mergeCreateTaskDetails(form);
-        CreateTaskReferenceResolver.Resolution resolution = merged == null || this.createTaskReferenceResolver == null
-                ? new CreateTaskReferenceResolver.Resolution(CreateTaskReferenceResolver.Status.FAILED, merged, List.of(),
-                        CreateTaskReferenceResolver.FAILED_CODE)
-                : this.createTaskReferenceResolver.resolve(merged);
-        if (resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED) {
-            return new CreateTaskDetailsResume(CreateTaskDetailsResumeStatus.UNRESOLVED, merged, resolution, null);
-        }
-        PendingToolCall createTask = originalCreateTask(runId, form, resolution.canonicalArguments());
-        if (resolution.status() == CreateTaskReferenceResolver.Status.FAILED) {
-            blockCreateTaskReferences(runId, createTask, resolution);
-            return settledCreateTask(merged, resolution, createTask);
-        }
-        return resumeResolvedCreateTask(runId, context, history, merged, resolution, createTask);
-    }
-
-    private String mergeCreateTaskDetails(PendingToolCall form) {
-        try {
-            return com.example.configmgr.ai.form.CreateTaskDetailsForm.mergeSubmission(form);
-        }
-        catch (IllegalArgumentException ex) {
-            log.warn("create task details receipt could not be merged; failing closed toolCallId={}", form.getToolCallId(), ex);
-            return null;
-        }
-    }
-
-    private PendingToolCall originalCreateTask(String runId, PendingToolCall form, String canonicalArguments) {
-        PendingToolCall existing = this.store.pending(runId, form.getCreateTaskToolCallId());
-        if (existing != null) {
-            return existing;
-        }
-        PendingToolCall createTask = new PendingToolCall();
-        createTask.setToolCallId(form.getCreateTaskToolCallId());
-        createTask.setName(TOOL_CREATE_TASK);
-        createTask.setType("function");
-        createTask.setArguments(ObjectUtils.defaultIfNull(canonicalArguments, form.getCreateTaskArguments()));
-        createTask.setKind(PendingToolCall.KIND_CONFIRM);
-        createTask.setIrreversible(false);
-        return createTask;
-    }
-
-    private CreateTaskDetailsResume resumeResolvedCreateTask(String runId, AiContext context, List<Message> history,
-                                                              String merged,
-                                                              CreateTaskReferenceResolver.Resolution resolution,
-                                                              PendingToolCall createTask) {
-        if (createTask.resolved() && !PendingToolCall.PENDING.equals(createTask.getStatus())) {
-            return settledCreateTask(merged, resolution, createTask);
-        }
-        if (this.createTaskDetailsForm == null) {
-            CreateTaskReferenceResolver.Resolution unavailable = new CreateTaskReferenceResolver.Resolution(
-                    CreateTaskReferenceResolver.Status.FAILED, createTask.getArguments(), List.of(),
-                    CreateTaskReferenceResolver.FAILED_CODE);
-            blockCreateTaskReferences(runId, createTask, unavailable);
-            return settledCreateTask(merged, unavailable, createTask);
-        }
-        if (!this.toolRegistry.isContextMatched(createTask.getName(), context)) {
-            blockOutOfScope(runId, context, createTask);
-            return settledCreateTask(merged, resolution, createTask);
-        }
-        CreateTaskInRun prior = createTaskAlreadyInRun(runId);
-        if (prior.created()) {
-            markCreateTaskLimit(runId, createTask, prior);
-            return settledCreateTask(merged, resolution, createTask);
-        }
-        if (!inspectResumedCreateTask(runId, context, createTask)) {
-            return settledCreateTask(merged, resolution, createTask);
-        }
-        if (!this.createTaskDetailsForm.parkCreateTaskConfirmation(runId, createTask, history)) {
-            return settledCreateTask(merged, resolution, createTask);
-        }
-        return new CreateTaskDetailsResume(CreateTaskDetailsResumeStatus.PARKED, merged, resolution, createTask);
-    }
-
-    private boolean inspectResumedCreateTask(String runId, AiContext context, PendingToolCall createTask) {
-        if (this.preflight == null || !ToolPreflightService.isSupported(createTask.getName())) {
-            return true;
-        }
-        ToolPreflightService.PreflightReport report;
-        try {
-            report = this.preflight.inspect(createTask.getName(), createTask.getArguments(), context);
-        }
-        catch (RuntimeException ex) {
-            blockPreflightUnavailable(runId, createTask, ex);
-            return false;
-        }
-        if (!report.pass()) {
-            blockPreflight(runId, createTask, report);
-            return false;
-        }
-        createTask.setPreflight(report.asMap());
-        return true;
-    }
-
-    private static CreateTaskDetailsResume settledCreateTask(String merged,
-                                                              CreateTaskReferenceResolver.Resolution resolution,
-                                                              PendingToolCall createTask) {
-        return new CreateTaskDetailsResume(CreateTaskDetailsResumeStatus.SETTLED, merged, resolution, createTask);
-    }
 
     /**
      * 续跑阶段结算一个挂起条目（{@code ResumeService} 的重建路径专用，SP-02 §5.5）。

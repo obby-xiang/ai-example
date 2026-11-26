@@ -8939,6 +8939,127 @@
           "reason": "实际planning Prompt先证实toolChoice=null并PARSED路径存在，再转为标准function toolChoice且1/1 GREEN；同测试断言turn-model、原runtime未变和internal execution=false。IDEA Reformat、IDEA定点编译、Maven compile及Checkstyle 0通过；未运行类/套件、真实模型或服务。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:011d7b859f429157660262bab498d3345b8a0ff01e7b41710019cd1259a78222",
+      "status": "reviewed",
+      "reason": "对暂存区13个生产文件逐文件逐hunk复核：完整删除独立ActionPlan解析和CREATE_TASK_DETAILS补偿恢复面；create_task仅在单个引用UNRESOLVED时交回既有createEntryCorrection一次，提示携带目录、未决项和当前Schema，补全重新经过resolver与真实主键核验后进入preflight/HITL；多动作不部分执行，已解析、纯文本、已纠正和任务上下文不触发。",
+      "reviewedAt": "2026-11-26T15:40:55+08:00",
+      "reviewer": "Kimi Code单循环补全实施后的静态逐hunk自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "删除ActionIntentParser、ActionPlan、submit_action_plan及ProviderRuntime工具上下文传参，未决create_task改用现有agent循环的一次createEntryCorrection。",
+          "reason": "独立解析器引入第二套模型协议和强制toolChoice，已确认方案要求复用同一模型与现有create_task，不再维护平行解析框架。",
+          "impact": "只有原始单个create_task因引用UNRESOLVED失败才补全；目录、未决项和Schema进入内部指令，结果重新canonical化并走原preflight/HITL，已纠正后失败直接终止。"
+        },
+        {
+          "change": "删除CREATE_TASK_DETAILS表单、专用resume/pending字段、前端标题映射及中英文补偿文案。",
+          "reason": "补偿表单与单次结构化补全重复弹卡并引入复杂恢复路径，方案明确不再提供该人工补偿入口。",
+          "impact": "补全失败没有补偿卡和任务创建；其他配置选择、条件、任务类型表单及既有批准、拒绝、取消流程保持。"
+        },
+        {
+          "change": "同一工具批中任一create_task引用未决时，其他动作统一跳过；returnDirect合成工具结果正文不再作为assistant正文上屏。",
+          "reason": "避免未决创建与其他动作部分执行，并防止内部工具结果JSON污染用户正文和补全前缀。",
+          "impact": "多动作批次零预检、零确认、零执行；真实assistant/tool历史保留，补全后的空回复不再触发额外通用重试。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/CreateTaskDetailsForm.java",
+          "status": "checked",
+          "reason": "整类及其表单构造、合并、再次挂起和创建确认恢复入口按确认方案删除，无Deprecated或兼容委托残留。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/FormPurposes.java",
+          "status": "checked",
+          "reason": "CREATE_TASK_DETAILS常量及ALL注册项删除，其余配置、条件和任务类型用途闭集不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/GenerativeFormRules.java",
+          "status": "checked",
+          "reason": "purpose文档删除CREATE_TASK_DETAILS约束说明，现行通用表单规则未改写。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/form/HostForm.java",
+          "status": "checked",
+          "reason": "共用挂起面注释移除已删除补偿表单，保留选择配置、任务类型和条件兜底的真实职责。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "删除parser注入、独立模型调用、runtime读取和补偿resume；resolver保留，UNRESOLVED交回外层一次，批内其他动作跳过，合成returnDirect正文被抑制且dead参数清理。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/intent/ActionIntentParser.java",
+          "status": "checked",
+          "reason": "独立规划模型、submit_action_plan、强制toolChoice、受限Schema校验及规划工具全部删除，不保留第二协议。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/intent/ActionPlan.java",
+          "status": "checked",
+          "reason": "actions[]计划record及依赖/unresolved结构随独立解析器删除，未新增替代协议模型。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/PendingToolCall.java",
+          "status": "checked",
+          "reason": "createTaskToolCallId/createTaskArguments专用字段和modelData输出删除，其余pending状态、执行与审批字段不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "needsCreateEntryCorrection只接受单个UNRESOLVED事实；现有correctionStream复用同runtime并携带目录、未决项和Schema，标记禁止二次补全及空回复重试，ProviderRuntime传参和合成正文清理。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java",
+          "status": "checked",
+          "reason": "CreateTaskDetailsForm注入及专用合并、再挂起、恢复分支删除，通用pending重建和用户取消拒绝终局路径保留。"
+        },
+        {
+          "path": "frontend/src/components/AiPanel/AiPanel.vue",
+          "status": "checked",
+          "reason": "FORM_PURPOSE_TITLE_KEYS删除CREATE_TASK_DETAILS映射，现有表单标题解析类型随之收窄且无新增前端框架。"
+        },
+        {
+          "path": "frontend/src/locales/en-US.json",
+          "status": "checked",
+          "reason": "删除createTaskDetails英文补偿标题，其余ai.gf用途文案与JSON结构保持有效。"
+        },
+        {
+          "path": "frontend/src/locales/zh-CN.json",
+          "status": "checked",
+          "reason": "删除createTaskDetails中文补偿标题，与英文键集合同步且不再展示补偿卡文案。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用既有Jackson ObjectMapper/ObjectNode、Spring注入、ToolRegistry、CreateTaskReferenceResolver及原correctionStream；未新增或升级依赖，也未引入解析框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增/触及helper均低于50行和复杂度20，控制块保留大括号，布尔getter使用is前缀；只删除JSON字段，未新增集合null、通配/static import、Lombok相等性或共享可变状态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "新日志仅含runId和正文字符数，补全构造异常保留cause并使用英文技术消息；未输出用户原文、目录JSON、上游body或敏感配置，失败不包装成成功。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "补偿表单及双语文案彻底删除，成功仅出现既有确认卡；returnDirect工具结果JSON不再上屏，其他卡片、滚动和渲染hunk未改。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "单run marker限制一次补全，同一runtime不强制toolChoice，结果重新resolver/preflight/HITL；多动作统一跳过，未新增模型并发、Redis键、数据库访问或改变取消拒绝终态。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "仅处理完整JSON参数和现成ChatResponse，未改字节流、SSE分片、UTF-8解码、代理对或字素截断；合成returnDirect文本在消费边界被明确抑制。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "真实RED包含未决判定false、混合批进入第二个HITL、合成JSON上屏及失败后第三次调用；逐方法GREEN覆盖canonical CURRENCY/code/CNY、零触发、二次失败零卡零任务、多动作跳过、值归一、多配置、全量、scopeKeys、批准拒绝取消。生产IDEA Reformat两次、363源文件Maven compile和前端vue-tsc通过；clean因既有jar被进程占用失败后直接compile成功，未重启服务、未运行类/套件或真实模型。"
+        }
+      }
     }
   ]
 }

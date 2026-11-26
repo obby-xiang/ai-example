@@ -21,17 +21,13 @@ public final class FormPurposes {
 	/** 收集任务类型（{@code EXPORT/IMPORT} 单个 enum 单选）。 */
 	public static final String TASK_TYPE = "TASK_TYPE";
 
-	/** 补充创建任务时尚未唯一解析的结构化引用。 */
-	public static final String CREATE_TASK_DETAILS = "CREATE_TASK_DETAILS";
-
 	/** 通用澄清（也是缺省用途）。 */
 	public static final String GENERAL_CLARIFY = "GENERAL_CLARIFY";
 
 	public static final String DEFAULT = GENERAL_CLARIFY;
 
 	/** 用途闭集（顺序即模型看到的描述顺序）。 */
-	public static final List<String> ALL = List.of(SELECT_DEFINITIONS, SET_CONDITIONS, TASK_TYPE, CREATE_TASK_DETAILS,
-			GENERAL_CLARIFY);
+	public static final List<String> ALL = List.of(SELECT_DEFINITIONS, SET_CONDITIONS, TASK_TYPE, GENERAL_CLARIFY);
 
 	private FormPurposes() {
 	}

@@ -26,8 +26,8 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * 宿主确定性表单的<b>共用挂起面</b>：选择配置项、任务类型、创建前结构化引用补充（{@code CREATE_TASK_DETAILS}）与
- * {@code confirm_step} 的条件兜底走的是<b>同一份</b>挂起、去重、序列化与失败收敛逻辑，
+ * 宿主确定性表单的<b>共用挂起面</b>：选择配置项、任务类型与 {@code confirm_step} 的条件兜底
+ * 走的是<b>同一份</b>挂起、去重、序列化与失败收敛逻辑，
  * 只有"什么时候该发"这一条按节点各不相同。
  *
  * <h2>为什么抽出基类</h2>
