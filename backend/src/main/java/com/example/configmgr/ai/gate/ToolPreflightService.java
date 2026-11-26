@@ -539,6 +539,14 @@ public class ToolPreflightService {
         return null;
     }
 
+    private static boolean hasConditionEntries(JsonNode conditionsNode) {
+        if (conditionsNode == null || conditionsNode.isEmpty()) {
+            return false;
+        }
+        JsonNode fields = conditionsNode.get("fields");
+        return fields == null || !fields.isArray() || !fields.isEmpty();
+    }
+
     private PreflightReport.Check checkCreateConditions(ConditionsRequest requestedConditions, DefCodes requested,
                                                         List<String> defCodes, String type, boolean english) {
         JsonNode conditionsNode = requestedConditions.node();
@@ -567,7 +575,7 @@ public class ToolPreflightService {
                     "conditions must be an object; use {} when undecided", "conditions 必须是对象；条件未决定时传 {}",
                     "The filter condition format is invalid; provide an empty condition set when undecided",
                     "筛选条件格式不正确；暂不确定时请给出空条件"));
-        } else if (!conditionsNode.isEmpty()
+        } else if (hasConditionEntries(conditionsNode)
                 && (!requested.present() || requested.invalid() || defCodes.size() != 1)) {
             conditionsValid = false;
             appendConditionMessages(conditionIssues, conditionDetails, ConditionMessages.of(english,
@@ -575,13 +583,13 @@ public class ToolPreflightService {
                     "非空 conditions 只允许一个合法的 defCode",
                     "Provide exactly one configuration item, then use one set_conditions(items) call for the others",
                     "非空条件只允许一个配置项；不同配置项的条件请在创建后通过一次 set_conditions(items) 批量给出"));
-        } else if (!conditionsNode.isEmpty() && this.definitionService == null) {
+        } else if (hasConditionEntries(conditionsNode) && this.definitionService == null) {
             conditionsValid = false;
             appendConditionMessages(conditionIssues, conditionDetails, ConditionMessages.of(english,
                     "Definition validation is unavailable; cannot create a task with conditions",
                     "配置定义校验不可用，不能带 conditions 创建任务",
                     "Configuration items cannot be verified right now; the task was not created", "暂时无法核对配置项，本次未创建"));
-        } else if (!conditionsNode.isEmpty()) {
+        } else if (hasConditionEntries(conditionsNode)) {
             conditionsValid = validateConditionDefinitions(defCodes, conditionsNode, conditionIssues, conditionDetails,
                     english);
         }

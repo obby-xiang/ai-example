@@ -1027,7 +1027,8 @@ public class SpToolCallingManager implements ToolCallingManager {
             Map<String, CreateTaskReferenceResolver.Resolution> createTaskResolutions) {
         PendingToolCall candidate = pendings.getFirst();
         CreateTaskReferenceResolver.Resolution resolution = createTaskResolutions.get(candidate.getToolCallId());
-        if (pendings.size() == 1 && isResolvedCreateTask(candidate, resolution)) {
+        if (pendings.size() == 1 && isResolvedCreateTask(candidate, resolution)
+                && !this.createTaskReferenceResolver.hasEmptyConditions(candidate.getArguments())) {
             preparePending(state, candidate, 1, resolution);
             return;
         }
@@ -1075,7 +1076,13 @@ public class SpToolCallingManager implements ToolCallingManager {
                                                 CreateTaskReferenceResolver.Resolution resolution) {
         if (resolution != null && resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED) {
             blockCreateTaskReferences(state.runId, pending, resolution);
+            pending.setTranscriptSegmentRequired(!isInternalCreateTaskReferenceRejection(state, pending));
         }
+    }
+
+    private boolean isInternalCreateTaskReferenceRejection(ToolBatchState state, PendingToolCall pending) {
+        return state.pendings.size() == 1 && !isCreateEntryCorrection(state.prompt)
+                && isSystemRejectedWithoutUserFrames(pending);
     }
 
     private void parkTaskTypeIfDue(ToolBatchState state, PendingToolCall pending, int batchSize) {
@@ -1423,6 +1430,12 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private void addPreflightBlockedResponse(ToolBatchState state, PendingToolCall pending) {
         String text = frameText(pending.getResultText());
+        if (isInternalCreateTaskReferenceRejection(state, pending)) {
+            state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
+                    modelData(pending, text, state.modelBudget)));
+            traceToolSkipped(state.runId, state.snapshot.getSessionId(), pending, pending.effectiveCode());
+            return;
+        }
         emitToolStartOnce(state.runId, state.toolStarted, pending);
         state.out.toolResult(pending, false, false, text);
         state.responses.add(new ToolResponseMessage.ToolResponse(pending.getToolCallId(), pending.getName(),
@@ -4458,11 +4471,14 @@ public class SpToolCallingManager implements ToolCallingManager {
     /**
      * 模型输入或调用顺序可由其下一拍纠正的零副作用拒绝，不产生用户可见工具帧。
      *
-     * <p>静默只覆盖生成式表单的 schema/槽位拒绝，以及 {@code confirm_step} 的条件结构纠正；
-     * 条目、日志和模型回执全部保留。表单回灌值不合法、用户拒绝/取消和真实执行失败不在此列。
+     * <p>静默只覆盖 create_task 的初始未决引用、生成式表单的 schema/槽位拒绝，以及 {@code confirm_step} 的条件结构纠正；
+     * 条目、日志和模型回执全部保留。corrected 最终失败、表单回灌值不合法、用户拒绝/取消和真实执行失败不在此列。
      */
     private static boolean isSystemRejectedWithoutUserFrames(PendingToolCall pending) {
         String code = pending.effectiveCode();
+        if (TOOL_CREATE_TASK.equals(pending.getName())) {
+            return CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(code);
+        }
         if (GenerativeFormRules.TOOL_NAME.equals(pending.getName())) {
             return ErrorCodes.FORM_SCHEMA_REJECTED.equals(code)
                     || ErrorCodes.FORM_SLOTS_ALREADY_KNOWN.equals(code);

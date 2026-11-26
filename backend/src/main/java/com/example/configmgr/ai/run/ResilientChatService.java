@@ -1826,14 +1826,18 @@ public class ResilientChatService {
         return unresolvedCreateTask;
     }
 
+    private List<ToolCallback> createEntryCorrectionTools(AiContext context) {
+        return this.toolRegistry.forContext(context).stream()
+                .filter(callback -> AiToolNames.CREATE_TASK.equals(callback.getToolDefinition().name()))
+                .toList();
+    }
+
     private String createEntryCorrection(String runId, AiContext context) {
         List<PendingToolCall> unresolved = this.store.pendings(runId).stream()
                 .filter(pending -> AiToolNames.CREATE_TASK.equals(pending.getName())
                         && CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode()))
                 .toList();
-        List<ToolCallback> tools = this.toolRegistry.forContext(context).stream()
-                .filter(callback -> AiToolNames.CREATE_TASK.equals(callback.getToolDefinition().name()))
-                .toList();
+        List<ToolCallback> tools = createEntryCorrectionTools(context);
         if (unresolved.size() != 1 || tools.size() != 1 || this.createTaskReferenceResolver == null
                 || this.definitionCatalog == null || this.objectMapper == null) {
             throw new AiStateUnavailableException("Create-entry correction facts are unavailable " + runId);
@@ -1854,7 +1858,8 @@ public class ResilientChatService {
             return SyntheticMessages.EXPORT_CORRECTION_PREFIX
                     + "上一次 create_task 因下列引用未唯一解析而失败。请依据原始对话、目录、未决项和 Schema，"
                     + "仅通过现有 create_task 返回一次完整参数，保留所有目标与条件，不得发明取值；"
-                    + "不得调用其他工具或直接创建任务。若仍无法确定，如实说明，不要重复已展示正文。\n"
+                    + "conditions={} 表示补全未完成，不能进入确认；原始用户明确不筛选时必须显式返回 conditions.fields=[]，"
+                    + "否则必须返回完整筛选条件。不得调用其他工具或直接创建任务。若仍无法确定，如实说明，不要重复已展示正文。\n"
                     + this.objectMapper.writeValueAsString(input);
         }
         catch (Exception ex) {
@@ -2227,9 +2232,14 @@ public class ResilientChatService {
         String instruction = createEntry ? createEntryCorrection(runId, latest) : exportWrapUpCorrection(latest.getTaskId());
         history.add(SyntheticMessages.internalUser(instruction, SyntheticMessages.Kind.CORRECTION,
                 createEntry ? "create-entry" : "export-wrap-up"));
-        Prompt prompt = buildResumedPrompt(runtime, runId, sessionId, latest, history, snapshot,
+        ProviderRuntime correctionRuntime = createEntry
+                ? this.providerRegistry.forReasoningRecovery(runtime, snapshot.getEmptyLengthReasoningRecovery())
+                : runtime;
+        Prompt prompt = buildResumedPrompt(correctionRuntime, runId, sessionId, latest, history, snapshot,
                 out == null ? this.store.lastIssuedSeq(runId) : out.lastIssuedSeq(), turnTextBody);
         if (createEntry && prompt.getOptions() instanceof ToolCallingChatOptions options) {
+            options.setToolCallbacks(createEntryCorrectionTools(latest));
+            options.setToolNames(Set.of(AiToolNames.CREATE_TASK));
             Map<String, Object> toolContext = new LinkedHashMap<>(options.getToolContext());
             toolContext.put(SpToolCallingManager.TOOL_CONTEXT_SUPPRESS_REASONING, true);
             toolContext.put(SpToolCallingManager.TOOL_CONTEXT_CREATE_ENTRY_CORRECTION, true);
@@ -2237,7 +2247,7 @@ public class ResilientChatService {
         }
         log.info("close correction request: history {} entries (incl. tool messages), type={} runId={}",
                 history.size(), createEntry ? "create_task" : "start_export", runId);
-        return runtime.chatModel().stream(prompt);
+        return correctionRuntime.chatModel().stream(prompt);
     }
 
     private void persistCorrectionHistory(String runId, RunSnapshot snapshot, List<Message> history) {

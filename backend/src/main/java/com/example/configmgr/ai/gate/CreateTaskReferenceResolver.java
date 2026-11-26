@@ -79,6 +79,16 @@ public class CreateTaskReferenceResolver {
         }
     }
 
+    public boolean hasEmptyConditions(String argumentsJson) {
+        try {
+            JsonNode conditions = this.mapper.readTree(argumentsJson).path("conditions");
+            return conditions.isObject() && conditions.isEmpty();
+        }
+        catch (Exception ex) {
+            return false;
+        }
+    }
+
     private List<SlotDefinition> resolveDefinitions(ObjectNode root, List<SlotDefinition> catalogEntries,
                                                      List<UnresolvedReference> unresolved) {
         JsonNode references = root.get("defCodes");

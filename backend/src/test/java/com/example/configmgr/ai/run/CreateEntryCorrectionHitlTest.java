@@ -93,7 +93,7 @@ class CreateEntryCorrectionHitlTest {
 
     private static final String UNRESOLVED_ARGUMENTS = "{\"type\":\"EXPORT\",\"defCodes\":[\"cny货币字典\"],\"conditions\":{}}";
 
-    private static final String ARGUMENTS = "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[],\"conditions\":{}}";
+    private static final String ARGUMENTS = "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[],\"conditions\":{\"fields\":[]}}";
 
     private final InMemoryRunStore store = new InMemoryRunStore(true) {
         @Override
@@ -248,6 +248,7 @@ class CreateEntryCorrectionHitlTest {
         when(this.providerRegistry.current()).thenReturn(runtime);
         when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(runtime));
         when(this.providerRegistry.forRequest(any(), any(), any())).thenReturn(runtime);
+        when(this.providerRegistry.forReasoningRecovery(any(), any())).thenAnswer(invocation -> invocation.getArgument(0));
         when(this.providerRegistry.target(any(), anyString())).thenReturn(Optional.of(new AiConfigService.ChatTarget(
                 new AiConfigService.ResolvedProvider(7L, "openai", "http://placeholder", "/chat/completions",
                         "test-model", "sk-test-0123456789", "fp", false), "test-model", true)));
@@ -285,6 +286,8 @@ class CreateEntryCorrectionHitlTest {
         assertThat(AiContext.fromMap(snapshot.getContext()).getExtra())
                 .containsEntry("createEntryCorrectionUsed", true);
         assertOriginalUnresolved();
+        assertThat(this.store.archivedTypes(RUN_ID)).doesNotContain("tool_result");
+        assertThat(snapshot.getMessageJson().toString()).contains(CreateTaskReferenceResolver.UNRESOLVED_CODE);
         PendingToolCall pending = this.store.pending(RUN_ID, CORRECTED_CALL_ID);
         assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PENDING);
         assertThat(pending.getArguments()).contains("\"defCodes\":[\"CURRENCY\"]")
@@ -364,7 +367,9 @@ class CreateEntryCorrectionHitlTest {
                     assertThat(pending.isExecuted()).isFalse();
                 });
         assertThat(this.store.archivedTypes(RUN_ID)).doesNotContain("confirm_request")
-                .allMatch(type -> !type.contains("form"));
+                .allMatch(type -> !type.contains("form"))
+                .contains("tool_result");
+        assertThat(this.store.pending(RUN_ID, "call-corrected").isTranscriptSegmentRequired()).isTrue();
         verifyNoInteractions(this.taskService);
         org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
                 .chatCompletionStream(any(ChatCompletionRequest.class), any());
@@ -471,6 +476,72 @@ class CreateEntryCorrectionHitlTest {
         assertThat(corrected.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
         assertThat(corrected.getCode()).isEqualTo(com.example.configmgr.ai.tool.ToolOutcome.CODE_PRECHECK_FAILED);
         assertTemporaryMarkerAbsent(this.store.get(RUN_ID), wire);
+    }
+
+    @Test
+    void correctionDisclosesOnlyCreateTaskAndUsesReasoningRecovery() {
+        useRealChatClient();
+        com.example.configmgr.ai.config.EmptyLengthReasoningRecovery recovery =
+                new com.example.configmgr.ai.config.EmptyLengthReasoningRecovery("low",
+                        Map.of("thinking", Map.of("type", "disabled")));
+        when(this.providerRegistry.emptyLengthReasoningRecovery(any(), any())).thenReturn(recovery);
+        when(this.providerRegistry.forReasoningRecovery(any(), any())).thenAnswer(invocation -> {
+            ProviderRuntime base = invocation.getArgument(0);
+            OpenAiChatOptions options = OpenAiChatOptions.fromOptions(base.options());
+            options.setReasoningEffort("low");
+            options.setExtraBody(Map.of("thinking", Map.of("type", "disabled")));
+            ReasoningAwareOpenAiChatModel recoveredModel = new ReasoningAwareOpenAiChatModel(base.api(), options,
+                    this.manager, RetryTemplate.defaultInstance(), ObservationRegistry.NOOP, 7L, true);
+            return new ProviderRuntime(base.providerId(), base.providerCode(), base.modelId(), base.baseUrl(),
+                    base.completionsPath(), base.runtimeKey(), options, base.api(), recoveredModel, base.chatClient());
+        });
+        unresolvedThenCorrected(AiToolNames.CREATE_TASK,
+                "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[],\"conditions\":{\"fields\":[]}}");
+
+        chat();
+
+        assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+        ArgumentCaptor<ChatCompletionRequest> upstream = ArgumentCaptor.forClass(ChatCompletionRequest.class);
+        org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
+                .chatCompletionStream(upstream.capture(), any());
+        ChatCompletionRequest correction = upstream.getAllValues().get(1);
+        assertThat(correction.tools()).singleElement().satisfies(tool ->
+                assertThat(tool.getFunction().getName()).isEqualTo(AiToolNames.CREATE_TASK));
+        assertThat(correction.extraBody()).containsEntry("thinking", Map.of("type", "disabled"));
+        assertThat(correction.toolChoice()).isNull();
+        assertThat(correction.messages().getLast().content()).contains("conditions.fields=[]");
+        org.mockito.Mockito.verify(this.providerRegistry, org.mockito.Mockito.times(2))
+                .forReasoningRecovery(any(), org.mockito.ArgumentMatchers.eq(recovery));
+    }
+
+    @Test
+    void correctedEmptyConditionsFailsClosedWithoutHitlOrThirdCall() {
+        useRealChatClient();
+        unresolvedThenCorrected(AiToolNames.CREATE_TASK,
+                "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{}}");
+
+        chat();
+
+        assertFailedWithoutFollowUp();
+        assertOriginalUnresolved();
+        PendingToolCall corrected = this.store.pending(RUN_ID, CORRECTED_CALL_ID);
+        assertThat(corrected.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+        assertThat(corrected.getCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
+    }
+
+    @Test
+    void correctedExplicitEmptyConditionFieldsStillEntersHitl() {
+        useRealChatClient();
+        unresolvedThenCorrected(AiToolNames.CREATE_TASK,
+                "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{\"fields\":[]}}");
+
+        chat();
+
+        assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+        assertThat(this.store.pending(RUN_ID, CORRECTED_CALL_ID).getStatus()).isEqualTo(PendingToolCall.PENDING);
+        verifyNoInteractions(this.taskService);
+        org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
+                .chatCompletionStream(any(ChatCompletionRequest.class), any());
     }
 
     @Test
@@ -893,6 +964,7 @@ class CreateEntryCorrectionHitlTest {
         assertThat(original.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
         assertThat(original.getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
         assertThat(original.isExecuted()).isFalse();
+        assertThat(original.isTranscriptSegmentRequired()).isFalse();
     }
 
     private void assertTemporaryMarkerAbsent(RunSnapshot snapshot) throws Exception {

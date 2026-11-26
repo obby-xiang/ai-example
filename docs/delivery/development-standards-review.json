@@ -9182,6 +9182,82 @@
           "reason": "corrected preflight失败与批准后navigate_to均先取得真实RED再GREEN；原句型、永久used二次抑制、严格corrected旧边界、取消/拒绝、异常无临时键和普通preflight续轮均逐方法通过。生产IDEA Reformat和Maven compile成功，未运行类/套件、真实模型或服务。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:2b9d4aa56e12a71ee1a492bff57eb7c260fb76f4c46757016626dc4cf32aa7d9",
+      "status": "reviewed",
+      "reason": "对真实验收失败的四个生产修复逐hunk复核：初始CREATE_TASK_REFERENCES_UNRESOLVED只抑制用户工具帧，pending/history/日志完整且corrected最终失败仍可见；correction仅披露create_task并复用forReasoningRecovery；corrected空conditions对象按未完成失败，显式fields=[]经统一preflight无条件语义进入HITL，普通创建路径不变。",
+      "reviewedAt": "2026-11-26T20:34:07+08:00",
+      "reviewer": "Kimi Code真实验收失败修复后的静态逐hunk自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "初始create_task引用未决复用isSystemRejectedWithoutUserFrames，抑制内部恢复的用户工具帧。",
+          "reason": "初始未决是内部correction事实，不应先向用户展示技术失败卡；但pending、历史、日志和后续补全必须保留。",
+          "impact": "初始失败卡不再出现，corrected最终失败的tool_result仍展示，状态不改成功，最终失败不隐藏。"
+        },
+        {
+          "change": "create_entry correction仅披露create_task，并使用forReasoningRecovery生成的runtime。",
+          "reason": "全部上下文工具会诱导模型先查目录或改道，recovery配置需要在本次补全真实生效且不得有供应商特例。",
+          "impact": "Prompt只有create_task及既有Schema，toolChoice保持空，禁thinking extraBody真实传递；普通创建和其他工具披露不变。"
+        },
+        {
+          "change": "corrected的conditions={}视为补全未完成，显式conditions.fields=[]表示真正无条件。",
+          "reason": "空对象会错误进入创建HITL，需要通用地区分补全遗漏与明确无条件，不能按关键词或CNY特判。",
+          "impact": "空对象直接returnDirect且无第三次上游/补偿卡；fields=[]经统一preflight无条件语义进入HITL，普通conditions={}创建保持原行为。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/CreateTaskReferenceResolver.java",
+          "status": "checked",
+          "reason": "hasEmptyConditions只复用现有ObjectMapper判断conditions为空对象，异常不落为空条件，未新增解析框架或业务特例。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "corrected准入增加空对象拒绝；初始单工具未决设置transcriptSegmentRequired=false且addPreflightBlockedResponse只保留模型回执，corrected下非空条件/最终失败仍走原帧和状态。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/ToolPreflightService.java",
+          "status": "checked",
+          "reason": "hasConditionEntries统一把fields空数组视为无条件，其他字段、scopeKeys、条件定义校验和普通conditions={}语义保持。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "correctionStream复用forReasoningRecovery，callbacks/toolNames仅create_task，指令明确空对象为未完成、fields=[]为明确无条件，未设置强制toolChoice。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用既有isSystemRejectedWithoutUserFrames、ToolRegistry、providerRegistry.forReasoningRecovery、Jackson和preflight，未新增依赖或框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增helper均低于50行和复杂度20，布尔方法使用has/is前缀，控制块有大括号；未新增集合null、通配/static import、JSON实体或共享可变状态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "初始pending/日志和模型回执保留，最终失败不包装成功；未新增用户原文、原始响应、临时标记或敏感输出。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "初始技术失败卡被抑制但corrected最终失败可见，空对象不弹补偿卡，fields=[]仅出现正常创建确认卡；前端代码未改。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "correction仍最多一次且只用现有runtime，空对象无第三次上游，永久used/临时标记语义不变；未新增Redis键、数据库访问、模型并发或改变取消拒绝终态。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "仅处理完整JSON条件、Prompt options和帧级工具结果，未改字节流、SSE分片、UTF-8、代理对或截断；内部帧抑制不影响历史完整性。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "初始拒帧、18工具、空条件分别取得真实RED后逐方法GREEN；单工具/禁thinking、fields=[]、最终失败可见、preflight、直接创建、导航和取消拒绝共10个方法通过。生产IDEA Reformat和Maven compile成功，未运行类/套件、真实模型或服务。"
+        }
+      }
     }
   ]
 }
