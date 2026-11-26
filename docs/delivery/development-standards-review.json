@@ -8507,6 +8507,57 @@
           "reason": "六个边界方法先取得预期RED，真实多卡与系统对照先确认基线后复验；最终28个规格及相邻方法均逐方法exit 0，三个生产文件IDEA Reformat ok，GREEN实际编译364源且最终compile和IDEA定点编译成功；未运行测试类/套件、真实模型或服务，所有命令和夹具修正追加到仓外报告。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:dafcdeb67e72c4a9fbe8befa990c44ad48ccedde618c1b2be29753b7b7f1ad29",
+      "status": "reviewed",
+      "reason": "对当前暂存的CreateTaskReferenceResolver生产hunk逐项复核：新增四参数Spring装配与旧构造器失败关闭，非枚举唯一主键仅经DefinitionService.findByCode和有界findRow归一，零/多rowKey、非文本、复合主键、缺scope和异常均保留原参数并FAILED；对应测试文件的九个独立行为及四个既有回归方法均单独实测。",
+      "reviewedAt": "2026-11-26T08:42:42+08:00",
+      "reviewer": "Kimi Code Task 1施工上下文静态逐hunk自审（按任务要求未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "非枚举唯一主键文本值可使用原值、Locale.ROOT大写和小写最多三次真实findRow查询，只有全部命中对应同一个权威rowKey才归一；无法唯一核验时FAILED且不输出猜测值。",
+          "reason": "旧逻辑只归一fieldCode并直接放行cny，缺少真实配置行依据；规格允许通过既有单键仓储做保守canonical化。",
+          "impact": "仅影响CreateTaskReferenceResolver的非枚举唯一主键标量值；GLOBAL使用null scopeKey，REGION/PROJECT要求恰好一个文本scopeKey，枚举、IN数组、非主键和无值算子路径保持原语义。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/CreateTaskReferenceResolver.java",
+          "status": "checked",
+          "reason": "逐hunk核对构造器注入、枚举优先分支、唯一主键与文本守卫、权威level/scope提取、LinkedHashSet候选去重、findRow参数及唯一rowKey写入；未新增全量数据查询、业务写入或未经核验的大写回退。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用既有DefinitionService.findByCode、ConfigDataRowRepository.findRow、Spring @Autowired、Apache StringUtils和JDK集合/Locale，没有新增或升级依赖。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增resolveValue、resolvePrimaryKeyValue和requiredScopeKey均低于50行且圈复杂度低于20，控制块保留大括号，顺序集合使用getFirst，未新增通配import、JSON实体或Lombok相等性实现。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "核验失败通过既有resolve异常边界记录英文WARN及Throwable并返回FAILED，原参数不含新增日志值；异常、零命中和多命中均未吞成成功或伪造canonical结果。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批未修改前端、表单、卡片或用户文案，未决/失败继续由既有CreateTaskReferenceResolver.Status及下游入口呈现。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "每个主键值仅执行去重后最多三次带defCode、level和scopeKey的findRow只读查询，不访问AI会话数据库、不写业务表、不新增Redis键、线程或模型调用，失败状态真实保留。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批只对完整JSON文本做Locale.ROOT大小写候选转换，不处理字节流、SSE分片、代理对、字素簇或截断。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "九个新增方法均有预期RED并逐个GREEN，四个既有枚举/数组/非主键/scopeKeys方法逐个GREEN；生产文件IDEA Reformat ok，Maven实际编译364源及最终compile、IDEA定点编译成功，定向Checkstyle为0违规；PMD因离线依赖不可用未执行，未运行测试类/套件、真实模型或服务。"
+        }
+      }
     }
   ]
 }

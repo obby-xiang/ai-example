@@ -3,17 +3,26 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.ai.slot.DefinitionCatalog;
 import com.example.configmgr.ai.slot.SlotDefinition;
 import com.example.configmgr.ai.slot.SlotDefinition.SlotField;
+import com.example.configmgr.data.entity.ConfigDataRow;
+import com.example.configmgr.data.repo.ConfigDataRowRepository;
+import com.example.configmgr.definition.entity.ConfigDefinition;
+import com.example.configmgr.definition.entity.ConfigDefinition.ConfigLevel;
+import com.example.configmgr.definition.service.DefinitionService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 
 @Slf4j
 @Component
@@ -27,9 +36,21 @@ public class CreateTaskReferenceResolver {
 
     private final ObjectMapper mapper;
 
+    private final DefinitionService definitionService;
+
+    private final ConfigDataRowRepository dataRowRepository;
+
     public CreateTaskReferenceResolver(DefinitionCatalog catalog, ObjectMapper mapper) {
+        this(catalog, mapper, null, null);
+    }
+
+    @Autowired
+    public CreateTaskReferenceResolver(DefinitionCatalog catalog, ObjectMapper mapper,
+                                       DefinitionService definitionService, ConfigDataRowRepository dataRowRepository) {
         this.catalog = catalog;
         this.mapper = mapper;
+        this.definitionService = definitionService;
+        this.dataRowRepository = dataRowRepository;
     }
 
     public Resolution resolve(String argumentsJson) {
@@ -130,7 +151,7 @@ public class CreateTaskReferenceResolver {
             if (!(fieldArray.get(index) instanceof ObjectNode field)) {
                 throw new IllegalArgumentException("conditions.fields entries must be objects");
             }
-            resolveField(field, definition, index, unresolved);
+            resolveField(field, definition, (ObjectNode) conditions, index, unresolved);
         }
     }
 
@@ -148,14 +169,14 @@ public class CreateTaskReferenceResolver {
         }
     }
 
-    private void resolveField(ObjectNode field, SlotDefinition definition, int fieldIndex,
+    private void resolveField(ObjectNode field, SlotDefinition definition, ObjectNode conditions, int fieldIndex,
                               List<UnresolvedReference> unresolved) {
         JsonNode referenceNode = field.get("fieldCode");
         if (referenceNode != null && referenceNode.isNull()) {
             Optional<SlotField> key = definition.keyField();
             if (key.isPresent()) {
                 field.put("fieldCode", key.get().code());
-                resolveEnumValue(field, key.get(), fieldIndex, unresolved);
+                resolveValue(field, definition, key.get(), conditions, fieldIndex, unresolved);
             }
             else {
                 unresolved.add(unresolvedField(fieldIndex, null, Reason.NO_UNIQUE_KEY));
@@ -174,7 +195,64 @@ public class CreateTaskReferenceResolver {
         }
         SlotField match = matches.getFirst();
         field.put("fieldCode", match.code());
-        resolveEnumValue(field, match, fieldIndex, unresolved);
+        resolveValue(field, definition, match, conditions, fieldIndex, unresolved);
+    }
+
+    private void resolveValue(ObjectNode field, SlotDefinition owner, SlotField fieldDefinition,
+                              ObjectNode conditions, int fieldIndex, List<UnresolvedReference> unresolved) {
+        if (!fieldDefinition.optionValues().isEmpty()) {
+            resolveEnumValue(field, fieldDefinition, fieldIndex, unresolved);
+            return;
+        }
+        if (fieldDefinition.isKey()) {
+            resolvePrimaryKeyValue(field, owner, conditions);
+        }
+    }
+
+    private void resolvePrimaryKeyValue(ObjectNode field, SlotDefinition definition, ObjectNode conditions) {
+        JsonNode value = field.get("value");
+        if (value == null) {
+            return;
+        }
+        if (!value.isTextual() || definition.keyFields().size() != 1
+                || this.definitionService == null || this.dataRowRepository == null) {
+            throw new IllegalArgumentException("primary key value requires text, a unique key and row verification");
+        }
+        ConfigDefinition authoritative = this.definitionService.findByCode(definition.code());
+        if (authoritative == null || authoritative.getLevel() == null) {
+            throw new IllegalStateException("primary key value resolution requires an authoritative level");
+        }
+        ConfigLevel level = authoritative.getLevel();
+        String scopeKey = level == ConfigLevel.GLOBAL ? null : requiredScopeKey(conditions);
+        Set<String> candidates = new LinkedHashSet<>();
+        candidates.add(value.asText());
+        candidates.add(value.asText().toUpperCase(Locale.ROOT));
+        candidates.add(value.asText().toLowerCase(Locale.ROOT));
+        LinkedHashSet<String> matchedRowKeys = new LinkedHashSet<>();
+        for (String candidate : candidates) {
+            Optional<ConfigDataRow> row = this.dataRowRepository.findRow(definition.code(), level.name(), scopeKey,
+                    candidate);
+            if (row.isPresent()) {
+                String rowKey = row.get().getRowKey();
+                if (rowKey == null) {
+                    throw new IllegalStateException("primary key row has no authoritative rowKey");
+                }
+                matchedRowKeys.add(rowKey);
+            }
+        }
+        if (matchedRowKeys.size() != 1) {
+            throw new IllegalStateException("primary key value must resolve to exactly one authoritative rowKey");
+        }
+        field.put("value", matchedRowKeys.getFirst());
+    }
+
+    private static String requiredScopeKey(ObjectNode conditions) {
+        JsonNode scopeKeys = conditions.get("scopeKeys");
+        if (scopeKeys == null || !scopeKeys.isArray() || scopeKeys.size() != 1
+                || !scopeKeys.get(0).isTextual() || StringUtils.isBlank(scopeKeys.get(0).asText())) {
+            throw new IllegalArgumentException("non-global primary key value requires exactly one textual scopeKey");
+        }
+        return scopeKeys.get(0).asText();
     }
 
     private static boolean isFieldMatch(String reference, SlotField field) {

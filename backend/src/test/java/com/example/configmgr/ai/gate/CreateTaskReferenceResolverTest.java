@@ -7,6 +7,11 @@ import com.example.configmgr.ai.slot.DefinitionCatalog;
 import com.example.configmgr.ai.slot.SlotDefinition;
 import com.example.configmgr.ai.slot.SlotDefinition.SlotField;
 import com.example.configmgr.ai.tools.AiTools;
+import com.example.configmgr.data.entity.ConfigDataRow;
+import com.example.configmgr.data.repo.ConfigDataRowRepository;
+import com.example.configmgr.definition.entity.ConfigDefinition;
+import com.example.configmgr.definition.entity.ConfigDefinition.ConfigLevel;
+import com.example.configmgr.definition.service.DefinitionService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -15,8 +20,14 @@ import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.ai.tool.annotation.ToolParam;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
+import static org.mockito.Mockito.when;
 
 class CreateTaskReferenceResolverTest {
 
@@ -150,6 +161,162 @@ class CreateTaskReferenceResolverTest {
     }
 
     @Test
+    void canonicalizesUniquePrimaryKeyFromBoundedCaseCandidates() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        when(definitions.findByCode("CURRENCY")).thenReturn(definition(ConfigLevel.GLOBAL));
+        when(rows.findRow("CURRENCY", "GLOBAL", null, "cNy")).thenReturn(Optional.empty());
+        when(rows.findRow("CURRENCY", "GLOBAL", null, "CNY"))
+                .thenReturn(Optional.of(row(ConfigLevel.GLOBAL, null, "CNY")));
+        when(rows.findRow("CURRENCY", "GLOBAL", null, "cny")).thenReturn(Optional.empty());
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve("""
+                {"type":"EXPORT","defCodes":["CURRENCY"],"conditions":{"fields":[{"fieldCode":"code","operator":"EQ","value":"cNy"}]}}
+                """);
+
+        assertThat(result.status()).isEqualTo(Status.RESOLVED);
+        JsonNode field = read(result.canonicalArguments()).path("conditions").path("fields").get(0);
+        assertThat(field.path("fieldCode").asText()).isEqualTo("code");
+        assertThat(field.path("value").asText()).isEqualTo("CNY");
+        verify(rows).findRow("CURRENCY", "GLOBAL", null, "cNy");
+        verify(rows).findRow("CURRENCY", "GLOBAL", null, "CNY");
+        verify(rows).findRow("CURRENCY", "GLOBAL", null, "cny");
+        verifyNoMoreInteractions(rows);
+    }
+
+    @Test
+    void zeroPrimaryKeyRowsFailClosedWithoutChangingValue() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        when(definitions.findByCode("CURRENCY")).thenReturn(definition(ConfigLevel.GLOBAL));
+        when(rows.findRow("CURRENCY", "GLOBAL", null, "cny")).thenReturn(Optional.empty());
+        when(rows.findRow("CURRENCY", "GLOBAL", null, "CNY")).thenReturn(Optional.empty());
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"cny\"}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
+
+        assertFailedUnchanged(result, arguments);
+        verify(rows).findRow("CURRENCY", "GLOBAL", null, "cny");
+        verify(rows).findRow("CURRENCY", "GLOBAL", null, "CNY");
+        verifyNoMoreInteractions(rows);
+    }
+
+    @Test
+    void multiplePrimaryKeyRowsFailClosedWithoutChoosingCase() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        when(definitions.findByCode("CURRENCY")).thenReturn(definition(ConfigLevel.GLOBAL));
+        when(rows.findRow("CURRENCY", "GLOBAL", null, "cNy")).thenReturn(Optional.empty());
+        when(rows.findRow("CURRENCY", "GLOBAL", null, "CNY"))
+                .thenReturn(Optional.of(row(ConfigLevel.GLOBAL, null, "CNY")));
+        when(rows.findRow("CURRENCY", "GLOBAL", null, "cny"))
+                .thenReturn(Optional.of(row(ConfigLevel.GLOBAL, null, "cny")));
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"cNy\"}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
+
+        assertFailedUnchanged(result, arguments);
+    }
+
+    @Test
+    void compositePrimaryKeyFailsClosedWithoutRowQueries() {
+        SlotDefinition composite = new SlotDefinition("CURRENCY", "货币字典", List.of(
+                new SlotField("code", "货币代码", true, List.of()),
+                new SlotField("region", "地区", true, List.of())));
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"cny\"}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(composite, definitions, rows).resolve(arguments);
+
+        assertFailedUnchanged(result, arguments);
+        verifyNoInteractions(definitions, rows);
+    }
+
+    @Test
+    void nonTextPrimaryKeyFailsClosedWithoutRowQueries() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":1}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
+
+        assertFailedUnchanged(result, arguments);
+        verifyNoInteractions(definitions, rows);
+    }
+
+    @Test
+    void nonGlobalPrimaryKeyWithoutScopeFailsClosed() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        when(definitions.findByCode("CURRENCY")).thenReturn(definition(ConfigLevel.REGION));
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"cny\"}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
+
+        assertFailedUnchanged(result, arguments);
+        verify(definitions).findByCode("CURRENCY");
+        verifyNoInteractions(rows);
+    }
+
+    @Test
+    void nonGlobalPrimaryKeyUsesSingleProvidedScopeKey() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        when(definitions.findByCode("CURRENCY")).thenReturn(definition(ConfigLevel.REGION));
+        when(rows.findRow("CURRENCY", "REGION", "R1", "cny")).thenReturn(Optional.empty());
+        when(rows.findRow("CURRENCY", "REGION", "R1", "CNY"))
+                .thenReturn(Optional.of(row(ConfigLevel.REGION, "R1", "CNY")));
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve("""
+                {"type":"EXPORT","defCodes":["CURRENCY"],"conditions":{"scopeKeys":["R1"],"fields":[{"fieldCode":"code","operator":"EQ","value":"cny"}]}}
+                """);
+
+        assertThat(result.status()).isEqualTo(Status.RESOLVED);
+        JsonNode condition = read(result.canonicalArguments()).path("conditions");
+        assertThat(condition.path("scopeKeys")).containsExactly(json("R1"));
+        assertThat(condition.path("fields").get(0).path("value").asText()).isEqualTo("CNY");
+        verify(rows).findRow("CURRENCY", "REGION", "R1", "cny");
+        verify(rows).findRow("CURRENCY", "REGION", "R1", "CNY");
+        verifyNoMoreInteractions(rows);
+    }
+
+    @Test
+    void primaryKeyRepositoryExceptionFailsClosed() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        when(definitions.findByCode("CURRENCY")).thenReturn(definition(ConfigLevel.GLOBAL));
+        when(rows.findRow("CURRENCY", "GLOBAL", null, "cny")).thenThrow(new IllegalStateException("row store unavailable"));
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"cny\"}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
+
+        assertFailedUnchanged(result, arguments);
+        verify(rows).findRow("CURRENCY", "GLOBAL", null, "cny");
+        verifyNoMoreInteractions(rows);
+    }
+
+    @Test
+    void missingRowVerificationDependenciesFailClosed() {
+        SlotDefinition definition = new SlotDefinition("CURRENCY", "货币字典", List.of(
+                new SlotField("code", "货币代码", true, List.of())));
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"cny\"}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = resolver(() -> List.of(definition)).resolve(arguments);
+
+        assertThat(result.status()).isEqualTo(Status.FAILED);
+        assertThat(result.failureCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
+        assertThat(result.canonicalArguments()).isEqualTo(arguments);
+    }
+
+    @Test
     void catalogFailureStaysFailed() {
         String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{}}";
 
@@ -276,6 +443,36 @@ class CreateTaskReferenceResolverTest {
 
     private CreateTaskReferenceResolver resolver(DefinitionCatalog catalog) {
         return new CreateTaskReferenceResolver(catalog, this.mapper);
+    }
+
+    private CreateTaskReferenceResolver verifiedResolver(SlotDefinition definition, DefinitionService definitions,
+            ConfigDataRowRepository rows) {
+        return new CreateTaskReferenceResolver(() -> List.of(definition), this.mapper, definitions, rows);
+    }
+
+    private void assertFailedUnchanged(CreateTaskReferenceResolver.Resolution result, String arguments) {
+        assertThat(result.status()).isEqualTo(Status.FAILED);
+        assertThat(result.failureCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
+        assertThat(result.canonicalArguments()).isEqualTo(arguments);
+        assertThat(result.unresolved()).isEmpty();
+    }
+
+    private static ConfigDefinition definition(ConfigLevel level) {
+        ConfigDefinition definition = new ConfigDefinition();
+        definition.setCode("CURRENCY");
+        definition.setName("货币字典");
+        definition.setLevel(level);
+        return definition;
+    }
+
+    private static ConfigDataRow row(ConfigLevel level, String scopeKey, String rowKey) {
+        ConfigDataRow row = new ConfigDataRow();
+        row.setDefCode("CURRENCY");
+        row.setScopeType(level.name());
+        row.setScopeKey(scopeKey);
+        row.setRowKey(rowKey);
+        row.setDataJson("{\"code\":\"" + rowKey + "\"}");
+        return row;
     }
 
     private void assertUnresolved(CreateTaskReferenceResolver resolver, String arguments, Kind kind, String reference,
