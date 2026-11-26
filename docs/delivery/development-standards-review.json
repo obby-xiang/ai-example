@@ -9370,6 +9370,72 @@
           "reason": "两个集成成功路径及resolver唯一证据先取得RED，随后10个resolver方法、4个correction/HITL方法和最后真实用户文本方法共15个方法逐一GREEN；两个生产文件已执行IDEA Reformat，Maven -DskipTests compile实际编译364个源文件成功。未运行整套测试、真实模型、真实服务、Redis或多实例验收，协议桩结果不外推。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:50c9a0f0a733de96c327b578730b8860ddec69743652eb3cdbc7f3d3ab1491ef",
+      "status": "reviewed",
+      "reason": "逐项复核空条件候选、显式空定义和作用域三个边界hunk：conditions={}与fields=[]只在唯一证据时补齐，非空fields不覆盖；defCodes=[]在目录匹配前直接拒绝且不回退为缺失/null；带scopeKeys的条件对象可进入核验，但非GLOBAL仍只有唯一非空文本scope才查询业务行。多定义测试改为CURRENCY与FX_RATE真实同时命中并断言两个外部服务零交互。",
+      "reviewedAt": "2026-11-26T22:16:35+08:00",
+      "reviewer": "Kimi Code证据边界审查修复后的静态逐hunk自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "corrected的conditions.fields=[]与conditions={}统一视为空条件候选，可在唯一目录和rowKey证据存在时补齐。",
+          "reason": "显式空fields此前被manager和resolver双重排除，无法利用确定证据，但无唯一证据时仍必须保留明确无条件语义。",
+          "impact": "唯一证据经原引用解析、preflight和HITL且无第三次模型调用；证据不足时fields=[]原样进入HITL，任何非空fields均不覆盖。"
+        },
+        {
+          "change": "显式defCodes=[]成为不可证据推断的独立全量/未选择配置状态，与缺失或null区分。",
+          "reason": "空数组表达调用方明确选择，不能因用户原文同时含配置名和值就被目录匹配改写。",
+          "impact": "resolver返回空且不调用DefinitionService或行仓储，manager保留原[]参数；缺失/null定义仍按原唯一证据候选处理。"
+        },
+        {
+          "change": "空条件判定只检查conditions.fields，不再因合法scopeKeys使条件对象非空而提前拒绝。",
+          "reason": "REGION等非GLOBAL定义必须携带作用域才能进行有界行核验，旧guard把正向单scope和非法多scope一并阻断。",
+          "impact": "REGION/R1可核验唯一CNY并保留scopeKeys；缺失、空数组、多scope或非文本scope继续由uniqueScopeKey拒绝且不查询行数据。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/CreateTaskEvidenceResolver.java",
+          "status": "checked",
+          "reason": "新增hasNoConditionEntries仅接受缺失/null fields或空数组，canComplete复用该判定并在目录匹配前拒绝显式空defCodes；单scope、单rowKey、分页上限和异常回退逻辑未改变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "shouldUseEvidence在RESOLVED时要求证据解析器存在并调用hasNoConditionEntries，使空对象和fields=[]都可进入同一补全路径，UNRESOLVED和后续二次RESOLVED校验不变。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "继续复用现有Jackson JsonNode/ObjectNode/ArrayNode和已有resolver方法，未新增JSON解析器、依赖、配置键或并行条件框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增重载均为短方法且复杂度低于20，布尔方法使用has前缀，所有控制块保留大括号；空数组和null先判定，未新增集合返回、通配/static import或共享可变状态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "候选判定解析失败返回false并保留原resolution，不输出参数或用户原文，不新增日志和异常分支；证据不足与仓储失败仍不包装为已成功补全。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "无前端或文案变更；唯一证据时显示原创建确认卡，无rowKey证据的fields=[]继续原无条件确认，显式空defCodes不被改成业务筛选卡。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "只调整完整结构化参数的候选准入，REGION/R1沿用既有单页业务行只读，不新增AI会话数据库、Redis、模型调用、线程或共享状态，也不改变preflight/HITL状态机。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "变更仅读取完整JSON数组和对象，不处理UTF-8字节、SSE分片、代理对、字素簇或截断，中文目录与rowKey匹配实现保持原样。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "corrected fields=[]与显式defCodes=[]均先取得行为RED再GREEN；REGION/R1以旧guard单次回放取得RED后恢复当前实现GREEN；多定义旧夹具先证明意外findByCode交互，最终双code文本GREEN。含空/多scope、空对象、无唯一rowKey及非空fields回归共9个方法逐方法通过。IDEA Reformat成功，方法测试实际编译364个生产源文件且最终Maven compile成功；未运行类/套件、真实模型或服务。"
+        }
+      }
     }
   ]
 }

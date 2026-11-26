@@ -78,16 +78,36 @@ public class CreateTaskEvidenceResolver {
         }
     }
 
-    private boolean canComplete(ObjectNode root) {
+    boolean hasNoConditionEntries(String argumentsJson) {
+        try {
+            return this.mapper.readTree(argumentsJson) instanceof ObjectNode root && hasNoConditionEntries(root);
+        }
+        catch (Exception ex) {
+            return false;
+        }
+    }
+
+    private static boolean hasNoConditionEntries(ObjectNode root) {
         JsonNode conditions = root.get("conditions");
-        if (conditions != null && !conditions.isNull() && (!conditions.isObject() || !conditions.isEmpty())) {
+        if (conditions == null || conditions.isNull()) {
+            return true;
+        }
+        if (!(conditions instanceof ObjectNode conditionObject)) {
+            return false;
+        }
+        JsonNode fields = conditionObject.get("fields");
+        return fields == null || fields.isNull() || fields instanceof ArrayNode array && array.isEmpty();
+    }
+
+    private boolean canComplete(ObjectNode root) {
+        if (!hasNoConditionEntries(root)) {
             return false;
         }
         JsonNode references = root.get("defCodes");
         if (references == null || references.isNull()) {
             return true;
         }
-        if (!(references instanceof ArrayNode array) || array.size() > 1) {
+        if (!(references instanceof ArrayNode array) || array.isEmpty() || array.size() > 1) {
             return false;
         }
         for (JsonNode reference : array) {

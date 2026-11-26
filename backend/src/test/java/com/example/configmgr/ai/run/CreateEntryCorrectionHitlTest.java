@@ -579,6 +579,32 @@ class CreateEntryCorrectionHitlTest {
     }
 
     @Test
+    void correctedExplicitEmptyConditionFieldsUseDeterministicEvidenceWithoutThirdCall() {
+        useRealChatClient();
+        CreateTaskEvidenceResolver evidenceResolver = org.mockito.Mockito.spy(new CreateTaskEvidenceResolver(() -> List.of(
+                new SlotDefinition("CURRENCY", "货币字典", List.of(
+                        new SlotDefinition.SlotField("code", "货币代码", true, List.of())))),
+                this.mapper, this.definitionService, this.dataRows));
+        org.mockito.Mockito.doReturn(Optional.empty()).doCallRealMethod()
+                .when(evidenceResolver).resolve(anyString(), anyString());
+        this.manager.setCreateTaskEvidenceResolver(evidenceResolver);
+        unresolvedThenCorrected(AiToolNames.CREATE_TASK,
+                "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{\"fields\":[]}}");
+
+        chatWithMessage("cny货币字典");
+
+        assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+        assertOriginalUnresolved();
+        PendingToolCall corrected = this.store.pending(RUN_ID, CORRECTED_CALL_ID);
+        assertThat(corrected.getStatus()).isEqualTo(PendingToolCall.PENDING);
+        assertThat(corrected.getArguments()).contains("\"defCodes\":[\"CURRENCY\"]")
+                .contains("\"fieldCode\":\"code\"").contains("\"value\":\"CNY\"");
+        verifyNoInteractions(this.taskService);
+        org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
+                .chatCompletionStream(any(ChatCompletionRequest.class), any());
+    }
+
+    @Test
     void correctedExplicitEmptyConditionFieldsStillEntersHitl() {
         useRealChatClient();
         unresolvedThenCorrected(AiToolNames.CREATE_TASK,

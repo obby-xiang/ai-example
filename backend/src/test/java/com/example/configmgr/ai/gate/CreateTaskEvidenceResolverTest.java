@@ -51,14 +51,28 @@ class CreateTaskEvidenceResolverTest {
     }
 
     @Test
+    void explicitEmptyDefinitionsDoNotGuess() {
+        CreateTaskEvidenceResolver resolver = resolver(currency(), definition(ConfigDefinition.ConfigLevel.GLOBAL));
+        when(this.rows.findRowsInScopePaged(org.mockito.ArgumentMatchers.eq("CURRENCY"),
+                org.mockito.ArgumentMatchers.eq("GLOBAL"), org.mockito.ArgumentMatchers.isNull(), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(row("CNY")), Pageable.ofSize(51), 1));
+
+        Optional<String> result = resolver.resolve(
+                "{\"type\":\"EXPORT\",\"defCodes\":[],\"conditions\":{}}", "cny货币字典");
+
+        assertThat(result).isEmpty();
+        verifyNoInteractions(this.definitions, this.rows);
+    }
+
+    @Test
     void multipleDefinitionsDoNotGuess() {
         CreateTaskEvidenceResolver resolver = resolverWithOther("货币");
 
         Optional<String> result = resolver.resolve(
-                "{\"type\":\"EXPORT\",\"defCodes\":[\"货币\"],\"conditions\":{}}", "cny货币");
+                "{\"type\":\"EXPORT\",\"defCodes\":[\"未知配置\"],\"conditions\":{}}", "CURRENCY FX_RATE");
 
         assertThat(result).isEmpty();
-        verifyNoInteractions(this.rows);
+        verifyNoInteractions(this.definitions, this.rows);
     }
 
     @Test
@@ -88,11 +102,43 @@ class CreateTaskEvidenceResolverTest {
     }
 
     @Test
+    void singleRegionScopeIsCompleted() throws Exception {
+        CreateTaskEvidenceResolver resolver = resolver(currency(), definition(ConfigDefinition.ConfigLevel.REGION));
+        ConfigDataRow cny = row("CNY");
+        cny.setScopeType("REGION");
+        cny.setScopeKey("R1");
+        when(this.rows.findRowsInScopePaged(org.mockito.ArgumentMatchers.eq("CURRENCY"),
+                org.mockito.ArgumentMatchers.eq("REGION"), org.mockito.ArgumentMatchers.eq("R1"), any(Pageable.class)))
+                .thenReturn(new PageImpl<>(List.of(cny), Pageable.ofSize(51), 1));
+
+        Optional<String> result = resolver.resolve(
+                "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{\"scopeKeys\":[\"R1\"]}}",
+                "cny货币字典");
+
+        assertThat(result).isPresent();
+        JsonNode canonical = this.mapper.readTree(result.get());
+        assertThat(canonical.path("conditions").path("scopeKeys")).containsExactly(this.mapper.readTree("\"R1\""));
+        assertThat(canonical.path("conditions").path("fields").get(0).path("value").asText()).isEqualTo("CNY");
+    }
+
+    @Test
     void missingScopeDoesNotGuess() {
         CreateTaskEvidenceResolver resolver = resolver(currency(), definition(ConfigDefinition.ConfigLevel.REGION));
 
         Optional<String> result = resolver.resolve(
                 "{\"type\":\"EXPORT\",\"defCodes\":[\"货币字典\"],\"conditions\":{\"scopeKeys\":[]}}", "cny货币字典");
+
+        assertThat(result).isEmpty();
+        verifyNoInteractions(this.rows);
+    }
+
+    @Test
+    void multipleScopesDoNotGuess() {
+        CreateTaskEvidenceResolver resolver = resolver(currency(), definition(ConfigDefinition.ConfigLevel.REGION));
+
+        Optional<String> result = resolver.resolve(
+                "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{\"scopeKeys\":[\"R1\",\"R2\"]}}",
+                "cny货币字典");
 
         assertThat(result).isEmpty();
         verifyNoInteractions(this.rows);

@@ -1011,7 +1011,8 @@ public class SpToolCallingManager implements ToolCallingManager {
     private boolean shouldUseEvidence(CreateTaskReferenceResolver.Resolution resolution) {
         return resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED
                 || resolution.status() == CreateTaskReferenceResolver.Status.RESOLVED
-                && this.createTaskReferenceResolver.hasEmptyConditions(resolution.canonicalArguments());
+                && this.createTaskEvidenceResolver != null
+                && this.createTaskEvidenceResolver.hasNoConditionEntries(resolution.canonicalArguments());
     }
 
     private CreateTaskReferenceResolver.Resolution resolveWithEvidence(String arguments, String userText,
