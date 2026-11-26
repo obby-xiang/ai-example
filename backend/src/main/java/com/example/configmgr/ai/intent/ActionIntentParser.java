@@ -17,6 +17,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.ai.tool.metadata.ToolMetadata;
@@ -179,6 +180,7 @@ public class ActionIntentParser {
                 : OpenAiChatOptions.fromOptions(runtime.options());
         options.setModel(runtime.modelId());
         options.setToolCallbacks(List.of(planningCallback()));
+        options.setToolChoice(OpenAiApi.ChatCompletionRequest.ToolChoiceBuilder.function(PLANNING_TOOL));
         options.setToolNames(Set.of());
         options.setInternalToolExecutionEnabled(false);
         options.setToolContext(Map.of());

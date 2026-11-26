@@ -8888,6 +8888,57 @@
           "reason": "新增对象约束违规方法先取得expected FAILED but was PARSED的真实RED，再独立GREEN；真实create_task Schema独立回归GREEN。生产IDEA Reformat、IDEA定点编译和Maven compile成功，定向Checkstyle 0；未运行类/套件、真实模型或服务。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:208ac05a2d6a015e2bdf0c4a7a19e41b192362ed175a2e83016463f365a7528c",
+      "status": "reviewed",
+      "reason": "复核ActionIntentParser.planningOptions新增OpenAI标准ToolChoiceBuilder.function(PLANNING_TOOL)，规划请求强制submit_action_plan，不再允许把普通文本当唯一预期；原runtime通过OpenAiChatOptions.fromOptions复制，模型名、参数、toolContext清空、内部执行禁用和响应形状校验均保持。",
+      "reviewedAt": "2026-11-26T12:56:05+08:00",
+      "reviewer": "Kimi Code Task 2 toolChoice修复静态逐hunk自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "专注规划Prompt使用标准toolChoice={type:function,function.name=submit_action_plan}强制规划函数。",
+          "reason": "只披露planningCallback不保证模型调用该函数，普通文本会增加无意义失败；宿主仍执行本地响应校验，不假设供应商strict JSON Schema能力。",
+          "impact": "仅改变专注解析请求的toolChoice；主模型及其他runtime options、模型身份、内部工具禁用、多动作/未知工具拒绝和失败关闭语义不变。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/intent/ActionIntentParser.java",
+          "status": "checked",
+          "reason": "在复制后的OpenAiChatOptions上设置ToolChoiceBuilder.function(PLANNING_TOOL)，没有修改共享runtime对象或增加供应商专有字段。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "直接使用现有Spring AI OpenAiApi.ChatCompletionRequest.ToolChoiceBuilder，没有新增依赖、框架或自定义协议模型。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "仅在既有planningOptions增加一个标准setter调用，方法规模、集合和JSON形状不变，未新增控制块或通配import。"
+        },
+        "logging-exception-safety": {
+          "status": "not-affected",
+          "reason": "本批仅设置标准toolChoice，不新增日志、异常分支、上游响应处理或敏感输出。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批不修改前端、表单、卡片、文案或向导，仅约束专注规划模型调用。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "toolChoice使用OpenAI标准function字段且仍禁止内部自动执行；runtime仅读本轮对象并复制options，未新增模型并发、Redis、数据库或SSE路径。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批不处理字节流、文本截断、代理对或SSE分片；完整JSON及LENGTH校验逻辑保持。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "实际planning Prompt先证实toolChoice=null并PARSED路径存在，再转为标准function toolChoice且1/1 GREEN；同测试断言turn-model、原runtime未变和internal execution=false。IDEA Reformat、IDEA定点编译、Maven compile及Checkstyle 0通过；未运行类/套件、真实模型或服务。"
+        }
+      }
     }
   ]
 }

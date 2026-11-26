@@ -14,6 +14,7 @@ import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.openai.OpenAiChatOptions;
+import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.ai.tool.method.MethodToolCallbackProvider;
@@ -40,6 +41,8 @@ class ActionIntentParserTest {
 
     private ChatModel chatModel;
 
+    private ProviderRuntime providedRuntime;
+
     @Test
     void parsesOriginalSentenceWithSchemaAndCatalogAsModelContext() throws Exception {
         ActionIntentParser.Result result = parse(VALID_PLAN, null);
@@ -64,6 +67,10 @@ class ActionIntentParserTest {
                 .contains("CNY");
         OpenAiChatOptions options = (OpenAiChatOptions) prompt.getOptions();
         assertThat(options.getModel()).isEqualTo("turn-model");
+        assertThat(options.getToolChoice()).isEqualTo(OpenAiApi.ChatCompletionRequest.ToolChoiceBuilder
+                .function(ActionIntentParser.PLANNING_TOOL));
+        assertThat(this.providedRuntime.options().getModel()).isEqualTo("ignored-default");
+        assertThat(this.providedRuntime.chatModel()).isSameAs(this.chatModel);
         assertThat(options.getInternalToolExecutionEnabled()).isFalse();
         assertThat(options.getToolContext()).isEmpty();
         assertThat(options.getToolCallbacks()).extracting(callback -> callback.getToolDefinition().name())
@@ -348,10 +355,11 @@ class ActionIntentParserTest {
         return new ActionIntentParser.Request("导出cny货币字典", definition, ORIGINAL);
     }
 
-    private static ProviderRuntime runtime(ChatModel model) {
-        return new ProviderRuntime(7L, "turn-provider", "turn-model", "http://localhost:0",
+    private ProviderRuntime runtime(ChatModel model) {
+        this.providedRuntime = new ProviderRuntime(7L, "turn-provider", "turn-model", "http://localhost:0",
                 "/v1/chat/completions", "turn-runtime", OpenAiChatOptions.builder().model("ignored-default")
                         .temperature(0.2).build(), null, model, null);
+        return this.providedRuntime;
     }
 
     private static ChatResponse response(String arguments, String finishReason) {
