@@ -1075,9 +1075,15 @@ public class SpToolCallingManager implements ToolCallingManager {
     private void blockCreateTaskReferencesIfDue(ToolBatchState state, PendingToolCall pending,
                                                 CreateTaskReferenceResolver.Resolution resolution) {
         if (resolution != null && resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED) {
+            pending.setTranscriptSegmentRequired(!isInternalCreateTaskReferenceRejection(state, pending, resolution));
             blockCreateTaskReferences(state.runId, pending, resolution);
-            pending.setTranscriptSegmentRequired(!isInternalCreateTaskReferenceRejection(state, pending));
         }
+    }
+
+    private boolean isInternalCreateTaskReferenceRejection(ToolBatchState state, PendingToolCall pending,
+            CreateTaskReferenceResolver.Resolution resolution) {
+        return state.pendings.size() == 1 && !isCreateEntryCorrection(state.prompt)
+                && CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(resolution.failureCode());
     }
 
     private boolean isInternalCreateTaskReferenceRejection(ToolBatchState state, PendingToolCall pending) {

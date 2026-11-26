@@ -34,6 +34,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.model.tool.ToolExecutionResult;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
@@ -72,10 +73,13 @@ class SpToolCallingManagerPendingArgumentsTest {
 
     private MessageJsonCodec codec;
 
+    private SseChatEmitter emitter;
+
     @BeforeEach
     void setUp() {
         this.store = mock(RunStore.class);
         this.registry = mock(RunRegistry.class);
+        this.emitter = mock(SseChatEmitter.class);
         this.gate = mock(ConfirmGate.class);
         this.toolRegistry = mock(ToolRegistry.class);
         this.codec = mock(MessageJsonCodec.class);
@@ -236,7 +240,7 @@ class SpToolCallingManagerPendingArgumentsTest {
     }
 
     @Test
-    void unresolvedCreateTaskIsBlockedWithoutCompensationForm() {
+    void unresolvedCreateTaskIsBlockedWithoutCompensationForm() throws Exception {
         CreateTaskReferenceResolver resolver = mock(CreateTaskReferenceResolver.class);
         String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"未知字典\"],\"conditions\":{}}";
         CreateTaskReferenceResolver.Resolution unresolved = new CreateTaskReferenceResolver.Resolution(
@@ -246,13 +250,24 @@ class SpToolCallingManagerPendingArgumentsTest {
                 CreateTaskReferenceResolver.UNRESOLVED_CODE);
         when(resolver.resolve(original)).thenReturn(unresolved);
         ReflectionTestUtils.setField(this.manager, "createTaskReferenceResolver", resolver);
+        AtomicReference<String> persistedJson = new AtomicReference<>();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            persistedJson.set(this.mapper.writeValueAsString(invocation.getArgument(1)));
+            return null;
+        }).when(this.store).putPending(eq("run-pending-arguments"), any(PendingToolCall.class));
 
-        execute(original);
+        ToolExecutionResult result = execute(original);
 
         verify(resolver).resolve(original);
         verifyNoInteractions(this.preflightProbe);
-        assertThat(capturedPending().getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
-        assertThat(capturedPending().getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+        PendingToolCall persisted = this.mapper.readValue(persistedJson.get(), PendingToolCall.class);
+        assertThat(persisted.getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
+        assertThat(persisted.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+        assertThat(persisted.isTranscriptSegmentRequired()).isFalse();
+        assertThat(result.conversationHistory().toString()).contains(CreateTaskReferenceResolver.UNRESOLVED_CODE);
+        verify(this.emitter, never()).toolStart(any(PendingToolCall.class));
+        verify(this.emitter, never()).toolResult(any(PendingToolCall.class),
+                org.mockito.ArgumentMatchers.anyBoolean(), org.mockito.ArgumentMatchers.anyBoolean(), anyString());
     }
 
     @Test
@@ -376,11 +391,11 @@ class SpToolCallingManagerPendingArgumentsTest {
                 new CreateTaskReferenceResolver(catalog, this.mapper));
     }
 
-    private void execute(String arguments) {
-        executeCalls(new AssistantMessage.ToolCall("call-create", "function", "create_task", arguments));
+    private ToolExecutionResult execute(String arguments) {
+        return executeCalls(new AssistantMessage.ToolCall("call-create", "function", "create_task", arguments));
     }
 
-    private void executeCalls(AssistantMessage.ToolCall... calls) {
+    private ToolExecutionResult executeCalls(AssistantMessage.ToolCall... calls) {
         String runId = "run-pending-arguments";
         RunSnapshot snapshot = new RunSnapshot();
         snapshot.setRunId(runId);
@@ -388,7 +403,7 @@ class SpToolCallingManagerPendingArgumentsTest {
         snapshot.setStatus(RunSnapshot.RUNNING);
         snapshot.setContext(AiContext.empty().toMap());
         when(this.store.get(runId)).thenReturn(snapshot);
-        when(this.registry.of(runId)).thenReturn(mock(SseChatEmitter.class));
+        when(this.registry.of(runId)).thenReturn(this.emitter);
         when(this.codec.serializeAll(anyList())).thenReturn(List.of("[]"));
         when(this.toolRegistry.channelOf("create_task")).thenReturn(ToolMeta.Channel.BACKEND);
         when(this.toolRegistry.riskOf("create_task")).thenReturn(ToolMeta.RiskLevel.DANGER);
@@ -396,7 +411,7 @@ class SpToolCallingManagerPendingArgumentsTest {
         ToolCallingChatOptions options = ToolCallingChatOptions.builder().toolContext(Map.of("runId", runId)).build();
         Prompt prompt = new Prompt(List.of(new UserMessage("structured arguments only")), options);
         AssistantMessage assistant = AssistantMessage.builder().toolCalls(List.of(calls)).build();
-        this.manager.executeToolCalls(prompt, new ChatResponse(List.of(new Generation(assistant))));
+        return this.manager.executeToolCalls(prompt, new ChatResponse(List.of(new Generation(assistant))));
     }
 
     private PendingToolCall capturedPending() {

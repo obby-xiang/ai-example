@@ -9258,6 +9258,57 @@
           "reason": "初始拒帧、18工具、空条件分别取得真实RED后逐方法GREEN；单工具/禁thinking、fields=[]、最终失败可见、preflight、直接创建、导航和取消拒绝共10个方法通过。生产IDEA Reformat和Maven compile成功，未运行类/套件、真实模型或服务。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:f3bc1e49c745d257b809a1ef252f51b99d27e2924b0f357dbc82aa971f4debc2",
+      "status": "reviewed",
+      "reason": "复核transcriptSegmentRequired持久化顺序修复：初始未决在blockCreateTaskReferences首次putPending之前，直接按本次resolution.failureCode确定false，不再先写true后改内存；corrected最终失败仍保持true。测试在putPending调用当刻独立序列化JSON，证明实时拒帧、持久化标志与correction历史一致。",
+      "reviewedAt": "2026-11-26T20:54:30+08:00",
+      "reviewer": "Kimi Code持久化顺序Critical修复后的静态逐hunk自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "初始未决的transcriptSegmentRequired改为首次持久化前由resolution.failureCode确定。",
+          "reason": "此前先store.putPending再设置false，真实Redis JSON会保留true，导致转录/恢复可能公开内部失败卡。",
+          "impact": "Redis JSON与实时帧一致抑制初始内部失败卡，pending/history/log/correction事实仍完整，corrected最终失败不隐藏。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "blockCreateTaskReferencesIfDue先按resolution.failureCode写入transcriptSegmentRequired再调用blockCreateTaskReferences，避免依赖pending.code后写和共享引用更新。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用现有Resolution、PendingToolCall和isSystemRejectedWithoutUserFrames机制，未新增依赖或替代框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增重载保持短方法和低复杂度，未新增集合、JSON实体、通配/static import或共享可变状态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "pending失败码、日志和模型回执保持完整，未将失败改成功，也未隐藏corrected最终失败。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "初始内部失败卡继续被抑制，持久化标志与实时帧一致，corrected最终失败卡仍可见；前端代码未改。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "首次putPending即写false，修复Redis JSON与内存/实时帧不一致，未新增永久键、数据库访问或改变取消拒绝语义。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "只调整完整PendingToolCall JSON字段的持久化顺序，未改字节流、SSE分片、UTF-8、代理对或截断。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "putPending当刻独立JSON先证明true的RED，再验证false的GREEN；原句型成功和corrected最终失败均逐方法通过。生产IDEA Reformat和Maven compile成功，未运行类/套件、真实模型或服务。"
+        }
+      }
     }
   ]
 }
