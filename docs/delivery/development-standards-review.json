@@ -8558,6 +8558,57 @@
           "reason": "九个新增方法均有预期RED并逐个GREEN，四个既有枚举/数组/非主键/scopeKeys方法逐个GREEN；生产文件IDEA Reformat ok，Maven实际编译364源及最终compile、IDEA定点编译成功，定向Checkstyle为0违规；PMD因离线依赖不可用未执行，未运行测试类/套件、真实模型或服务。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:6362dbcbe33e55bb68ace0aa34c5ebf218f063c733797bb0f5050182c46d759d",
+      "status": "reviewed",
+      "reason": "对审查返修的最终暂存hunk逐项复核：主键归一入口增加文本标量EQ、唯一主键和依赖前置条件，非GLOBAL仅唯一scope可查；精确原值命中直接返回，零/多候选保留原值并RESOLVED，只有真实仓储或定义异常继续经既有WARN和FAILED边界，合法非EQ、IN、null、数值、布尔、复合主键及多范围不再误拒。",
+      "reviewedAt": "2026-11-26T09:29:49+08:00",
+      "reviewer": "Kimi Code Task 1独立审查返修上下文静态逐hunk自审（按任务要求未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "收窄主键canonical化资格为文本标量EQ、恰好一个主键、唯一可确定范围且生产依赖齐全；精确原值优先，零/多候选不再FAILED而保留原值继续，其他形状完全沿用原语义。",
+          "reason": "独立审查指出此前把合法空结果及非EQ、非枚举IN、显式null、数值/布尔、复合主键和多范围错误升级为创建失败；真实查询异常仍需可观测。",
+          "impact": "仅改变CreateTaskReferenceResolver非枚举主键核验的准入和未唯一命中结局；既有枚举与IN处理、生产构造器装配及唯一候选rowKey归一保持，未跟踪设计文档已同步但不纳入本批。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/CreateTaskReferenceResolver.java",
+          "status": "checked",
+          "reason": "逐hunk核对canResolvePrimaryKeyValue的operator/value/key/依赖条件、uniqueScopeKey的空结果、精确行短路、upper/lower去重及唯一rowKey写入；零和多命中无异常抛出，查询异常未被吞没。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "返修继续复用既有DefinitionService.findByCode、ConfigDataRowRepository.findRow、StringUtils和JDK集合，没有新增依赖、仓储方法或全量查询。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "resolvePrimaryKeyValue及新增canResolvePrimaryKeyValue、uniqueScopeKey、authoritativeRowKey均低于50行和复杂度20，控制块保留大括号，顺序集合使用getFirst，可空scope在查询前显式收窄。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "零/多命中及不合格形状不再生成误导异常；真实DefinitionService或findRow异常仍沿既有resolve WARN携带Throwable并FAILED，不静默伪装canonical成功。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批未修改前端、表单、文案或卡片，合法形状恢复既有RESOLVED流程而不新增用户可见协议。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "仅合格EQ主键执行最多三次有界只读findRow，精确命中后停止；非EQ、数组、非文本和复合主键零查询，多范围只读定义后零行查询，不写业务或AI会话状态。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "返修只调整完整JSON值的准入和大小写候选控制流，不处理字节流、SSE分片、代理对、字素簇或截断。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "十二个保留原值方法先证实RESOLVED被旧实现误改为FAILED，精确命中方法先证实多余候选查询；十三个方法逐个GREEN，另五个唯一归一/单范围/仓储异常/枚举/IN方法逐个GREEN。IDEA Reformat与定点编译成功，Maven逐方法编译测试及最终compile成功，Checkstyle为0；PMD沿用已证实离线依赖阻塞未复跑，未运行类/套件、真实模型或服务。"
+        }
+      }
     }
   ]
 }

@@ -210,49 +210,62 @@ public class CreateTaskReferenceResolver {
     }
 
     private void resolvePrimaryKeyValue(ObjectNode field, SlotDefinition definition, ObjectNode conditions) {
-        JsonNode value = field.get("value");
-        if (value == null) {
+        if (!canResolvePrimaryKeyValue(field, definition)) {
             return;
-        }
-        if (!value.isTextual() || definition.keyFields().size() != 1
-                || this.definitionService == null || this.dataRowRepository == null) {
-            throw new IllegalArgumentException("primary key value requires text, a unique key and row verification");
         }
         ConfigDefinition authoritative = this.definitionService.findByCode(definition.code());
         if (authoritative == null || authoritative.getLevel() == null) {
-            throw new IllegalStateException("primary key value resolution requires an authoritative level");
+            return;
         }
         ConfigLevel level = authoritative.getLevel();
-        String scopeKey = level == ConfigLevel.GLOBAL ? null : requiredScopeKey(conditions);
+        String scopeKey = level == ConfigLevel.GLOBAL ? null : uniqueScopeKey(conditions);
+        if (level != ConfigLevel.GLOBAL && scopeKey == null) {
+            return;
+        }
+        String original = field.path("value").asText();
+        Optional<ConfigDataRow> exact = this.dataRowRepository.findRow(definition.code(), level.name(), scopeKey,
+                original);
+        if (exact.isPresent()) {
+            field.put("value", authoritativeRowKey(exact.get()));
+            return;
+        }
         Set<String> candidates = new LinkedHashSet<>();
-        candidates.add(value.asText());
-        candidates.add(value.asText().toUpperCase(Locale.ROOT));
-        candidates.add(value.asText().toLowerCase(Locale.ROOT));
+        candidates.add(original.toUpperCase(Locale.ROOT));
+        candidates.add(original.toLowerCase(Locale.ROOT));
+        candidates.remove(original);
         LinkedHashSet<String> matchedRowKeys = new LinkedHashSet<>();
         for (String candidate : candidates) {
             Optional<ConfigDataRow> row = this.dataRowRepository.findRow(definition.code(), level.name(), scopeKey,
                     candidate);
             if (row.isPresent()) {
-                String rowKey = row.get().getRowKey();
-                if (rowKey == null) {
-                    throw new IllegalStateException("primary key row has no authoritative rowKey");
-                }
-                matchedRowKeys.add(rowKey);
+                matchedRowKeys.add(authoritativeRowKey(row.get()));
             }
         }
-        if (matchedRowKeys.size() != 1) {
-            throw new IllegalStateException("primary key value must resolve to exactly one authoritative rowKey");
+        if (matchedRowKeys.size() == 1) {
+            field.put("value", matchedRowKeys.getFirst());
         }
-        field.put("value", matchedRowKeys.getFirst());
     }
 
-    private static String requiredScopeKey(ObjectNode conditions) {
+    private boolean canResolvePrimaryKeyValue(ObjectNode field, SlotDefinition definition) {
+        JsonNode value = field.get("value");
+        return value != null && value.isTextual() && "EQ".equals(field.path("operator").asText())
+                && definition.keyFields().size() == 1 && this.definitionService != null && this.dataRowRepository != null;
+    }
+
+    private static String uniqueScopeKey(ObjectNode conditions) {
         JsonNode scopeKeys = conditions.get("scopeKeys");
         if (scopeKeys == null || !scopeKeys.isArray() || scopeKeys.size() != 1
                 || !scopeKeys.get(0).isTextual() || StringUtils.isBlank(scopeKeys.get(0).asText())) {
-            throw new IllegalArgumentException("non-global primary key value requires exactly one textual scopeKey");
+            return null;
         }
         return scopeKeys.get(0).asText();
+    }
+
+    private static String authoritativeRowKey(ConfigDataRow row) {
+        if (row.getRowKey() == null) {
+            throw new IllegalStateException("primary key row has no authoritative rowKey");
+        }
+        return row.getRowKey();
     }
 
     private static boolean isFieldMatch(String reference, SlotField field) {

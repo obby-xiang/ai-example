@@ -185,7 +185,7 @@ class CreateTaskReferenceResolverTest {
     }
 
     @Test
-    void zeroPrimaryKeyRowsFailClosedWithoutChangingValue() {
+    void zeroPrimaryKeyRowsPreserveOriginalValue() {
         DefinitionService definitions = mock(DefinitionService.class);
         ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
         when(definitions.findByCode("CURRENCY")).thenReturn(definition(ConfigLevel.GLOBAL));
@@ -196,14 +196,14 @@ class CreateTaskReferenceResolverTest {
 
         CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
 
-        assertFailedUnchanged(result, arguments);
+        assertResolvedUnchanged(result, arguments);
         verify(rows).findRow("CURRENCY", "GLOBAL", null, "cny");
         verify(rows).findRow("CURRENCY", "GLOBAL", null, "CNY");
         verifyNoMoreInteractions(rows);
     }
 
     @Test
-    void multiplePrimaryKeyRowsFailClosedWithoutChoosingCase() {
+    void multiplePrimaryKeyRowsPreserveOriginalValueWithoutChoosingCase() {
         DefinitionService definitions = mock(DefinitionService.class);
         ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
         when(definitions.findByCode("CURRENCY")).thenReturn(definition(ConfigLevel.GLOBAL));
@@ -217,11 +217,11 @@ class CreateTaskReferenceResolverTest {
 
         CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
 
-        assertFailedUnchanged(result, arguments);
+        assertResolvedUnchanged(result, arguments);
     }
 
     @Test
-    void compositePrimaryKeyFailsClosedWithoutRowQueries() {
+    void compositePrimaryKeyPreservesOriginalValueWithoutQueries() {
         SlotDefinition composite = new SlotDefinition("CURRENCY", "货币字典", List.of(
                 new SlotField("code", "货币代码", true, List.of()),
                 new SlotField("region", "地区", true, List.of())));
@@ -232,12 +232,12 @@ class CreateTaskReferenceResolverTest {
 
         CreateTaskReferenceResolver.Resolution result = verifiedResolver(composite, definitions, rows).resolve(arguments);
 
-        assertFailedUnchanged(result, arguments);
+        assertResolvedUnchanged(result, arguments);
         verifyNoInteractions(definitions, rows);
     }
 
     @Test
-    void nonTextPrimaryKeyFailsClosedWithoutRowQueries() {
+    void numericPrimaryKeyPreservesOriginalValueWithoutQueries() {
         DefinitionService definitions = mock(DefinitionService.class);
         ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
         String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
@@ -245,12 +245,12 @@ class CreateTaskReferenceResolverTest {
 
         CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
 
-        assertFailedUnchanged(result, arguments);
+        assertResolvedUnchanged(result, arguments);
         verifyNoInteractions(definitions, rows);
     }
 
     @Test
-    void nonGlobalPrimaryKeyWithoutScopeFailsClosed() {
+    void nonGlobalPrimaryKeyWithoutScopePreservesOriginalValue() {
         DefinitionService definitions = mock(DefinitionService.class);
         ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
         when(definitions.findByCode("CURRENCY")).thenReturn(definition(ConfigLevel.REGION));
@@ -259,7 +259,7 @@ class CreateTaskReferenceResolverTest {
 
         CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
 
-        assertFailedUnchanged(result, arguments);
+        assertResolvedUnchanged(result, arguments);
         verify(definitions).findByCode("CURRENCY");
         verifyNoInteractions(rows);
     }
@@ -287,6 +287,104 @@ class CreateTaskReferenceResolverTest {
     }
 
     @Test
+    void nonEqPrimaryKeyPreservesOriginalValueWithoutQueries() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"NE\",\"value\":\"cny\"}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
+
+        assertResolvedUnchanged(result, arguments);
+        verifyNoInteractions(definitions, rows);
+    }
+
+    @Test
+    void nonEnumInArrayPreservesOriginalValuesWithoutQueries() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"IN\",\"value\":[\"cny\",\"Usd\"]}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
+
+        assertResolvedUnchanged(result, arguments);
+        verifyNoInteractions(definitions, rows);
+    }
+
+    @Test
+    void explicitNullPrimaryKeyValuePreservesOriginalWithoutQueries() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":null}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
+
+        assertResolvedUnchanged(result, arguments);
+        verifyNoInteractions(definitions, rows);
+    }
+
+    @Test
+    void booleanPrimaryKeyPreservesOriginalValueWithoutQueries() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":true}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
+
+        assertResolvedUnchanged(result, arguments);
+        verifyNoInteractions(definitions, rows);
+    }
+
+    @Test
+    void multipleNonGlobalScopesPreserveOriginalValueWithoutRowQueries() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        when(definitions.findByCode("CURRENCY")).thenReturn(definition(ConfigLevel.REGION));
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"scopeKeys\":[\"R1\",\"R2\"],\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"cny\"}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
+
+        assertResolvedUnchanged(result, arguments);
+        verify(definitions).findByCode("CURRENCY");
+        verifyNoInteractions(rows);
+    }
+
+    @Test
+    void exactOriginalPrimaryKeyRowSkipsCaseCandidates() {
+        DefinitionService definitions = mock(DefinitionService.class);
+        ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
+        when(definitions.findByCode("CURRENCY")).thenReturn(definition(ConfigLevel.GLOBAL));
+        when(rows.findRow("CURRENCY", "GLOBAL", null, "cny"))
+                .thenReturn(Optional.of(row(ConfigLevel.GLOBAL, null, "cny")));
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"cny\"}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = verifiedResolver(currency(), definitions, rows).resolve(arguments);
+
+        assertResolvedUnchanged(result, arguments);
+        verify(rows).findRow("CURRENCY", "GLOBAL", null, "cny");
+        verifyNoMoreInteractions(rows);
+    }
+
+    @Test
+    void nullFieldPlaceholderKeepsKeyInferenceWithoutVerificationDependencies() {
+        String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
+                + "\"conditions\":{\"fields\":[{\"fieldCode\":null,\"operator\":\"EQ\",\"value\":\"cny\"}]}}";
+
+        CreateTaskReferenceResolver.Resolution result = resolver(() -> List.of(currency())).resolve(arguments);
+
+        assertThat(result.status()).isEqualTo(Status.RESOLVED);
+        JsonNode field = read(result.canonicalArguments()).path("conditions").path("fields").get(0);
+        assertThat(field.path("fieldCode").asText()).isEqualTo("code");
+        assertThat(field.path("value").asText()).isEqualTo("cny");
+        assertThat(result.unresolved()).isEmpty();
+    }
+
+    @Test
     void primaryKeyRepositoryExceptionFailsClosed() {
         DefinitionService definitions = mock(DefinitionService.class);
         ConfigDataRowRepository rows = mock(ConfigDataRowRepository.class);
@@ -303,7 +401,7 @@ class CreateTaskReferenceResolverTest {
     }
 
     @Test
-    void missingRowVerificationDependenciesFailClosed() {
+    void missingRowVerificationDependenciesPreserveOriginalValue() {
         SlotDefinition definition = new SlotDefinition("CURRENCY", "货币字典", List.of(
                 new SlotField("code", "货币代码", true, List.of())));
         String arguments = "{\"type\":\"EXPORT\",\"defCodes\":[\"CURRENCY\"],"
@@ -311,9 +409,7 @@ class CreateTaskReferenceResolverTest {
 
         CreateTaskReferenceResolver.Resolution result = resolver(() -> List.of(definition)).resolve(arguments);
 
-        assertThat(result.status()).isEqualTo(Status.FAILED);
-        assertThat(result.failureCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
-        assertThat(result.canonicalArguments()).isEqualTo(arguments);
+        assertResolvedUnchanged(result, arguments);
     }
 
     @Test
@@ -448,6 +544,13 @@ class CreateTaskReferenceResolverTest {
     private CreateTaskReferenceResolver verifiedResolver(SlotDefinition definition, DefinitionService definitions,
             ConfigDataRowRepository rows) {
         return new CreateTaskReferenceResolver(() -> List.of(definition), this.mapper, definitions, rows);
+    }
+
+    private void assertResolvedUnchanged(CreateTaskReferenceResolver.Resolution result, String arguments) {
+        assertThat(result.status()).isEqualTo(Status.RESOLVED);
+        assertThat(result.failureCode()).isNull();
+        assertThat(result.canonicalArguments()).isEqualTo(arguments);
+        assertThat(result.unresolved()).isEmpty();
     }
 
     private void assertFailedUnchanged(CreateTaskReferenceResolver.Resolution result, String arguments) {
