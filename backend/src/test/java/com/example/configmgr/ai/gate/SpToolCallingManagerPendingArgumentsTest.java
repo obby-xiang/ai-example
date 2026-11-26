@@ -191,10 +191,17 @@ class SpToolCallingManagerPendingArgumentsTest {
                 .hasSize(2)
                 .extracting(PendingToolCall::getToolCallId)
                 .containsExactly("call-create", "call-create-2");
-        assertThat(captor.getAllValues()).filteredOn(entry -> "create_task".equals(entry.getName()))
-                .allSatisfy(entry -> {
+        assertThat(captor.getAllValues()).filteredOn(entry -> "call-create".equals(entry.getToolCallId()))
+                .singleElement().satisfies(entry -> {
                     assertThat(entry.getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
                     assertThat(entry.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+                    assertThat(entry.getArguments()).isEqualTo(original);
+                    assertThat(entry.isExecuted()).isFalse();
+                });
+        assertThat(captor.getAllValues()).filteredOn(entry -> "call-create-2".equals(entry.getToolCallId()))
+                .singleElement().satisfies(entry -> {
+                    assertThat(entry.getCode()).isEqualTo(com.example.configmgr.ai.tool.ToolOutcome.CODE_UPSTREAM_FAILED);
+                    assertThat(entry.getStatus()).isEqualTo(PendingToolCall.SKIPPED);
                     assertThat(entry.getArguments()).isEqualTo(original);
                     assertThat(entry.isExecuted()).isFalse();
                 });

@@ -9060,6 +9060,67 @@
           "reason": "真实RED包含未决判定false、混合批进入第二个HITL、合成JSON上屏及失败后第三次调用；逐方法GREEN覆盖canonical CURRENCY/code/CNY、零触发、二次失败零卡零任务、多动作跳过、值归一、多配置、全量、scopeKeys、批准拒绝取消。生产IDEA Reformat两次、363源文件Maven compile和前端vue-tsc通过；clean因既有jar被进程占用失败后直接compile成功，未重启服务、未运行类/套件或真实模型。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:7535a74dbf2db4a22abd9d4ba82379d8def875f921b47c24f25583acd72f8b7e",
+      "status": "reviewed",
+      "reason": "对独立审查修复的最终两个生产文件逐hunk复核：带createEntryCorrectionUsed的工具批只接受单个合法type且RESOLVED的create_task；其他工具、多工具、缺type、UNRESOLVED/FAILED均首项失败、其余跳过并returnDirect，禁止parkTaskType和官方下一跳；FAILED与UNRESOLVED的合成JSON都抑制上屏。补全reasoning从prompt上一条assistant继承，第二段不泄漏。",
+      "reviewedAt": "2026-11-26T16:38:47+08:00",
+      "reviewer": "Kimi Code独立审查修复后的静态逐hunk自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "已置createEntryCorrectionUsed的工具批实行严格单create_task+RESOLVED准入，FAILED与UNRESOLVED都直接returnDirect。",
+          "reason": "独立审查发现缺type和其他工具会进入官方下一跳并重复预检，FAILED也未被直接收口，存在无限续轮和部分执行风险。",
+          "impact": "非法corrected批次不再parkTaskType、不弹补偿表单、不进入preflight/HITL或官方下一跳；合法单个RESOLVED创建仍走原确认链。"
+        },
+        {
+          "change": "corrected assistant在抑制第二段reasoning时继承prompt上一条assistant的reasoning。",
+          "reason": "原始工具轮的reasoning不进入ResilientChatService流式累加器，但已存在于补全历史；直接取空turnText会丢失首段。",
+          "impact": "首段reasoning存在于快照/历史且第二段被隔离；首段为空时不继承第二段，其他metadata和工具调用结构不变。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "prepareCorrectedCreateTaskBatch按extra标记严格核验数量、名称、type和resolution；非法首项复用blockCreateTaskReferences、其余skipHaltedPending，FAILED/UNRESOLVED均returnDirect并抑制JSON，reasoningBeforeToolCall只读上一条assistant。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "现有CREATE_ENTRY_CORRECTION_MARKER改为public供manager读取同一常量，未新增标记、文案判定或第二状态源。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用既有AiContext.extra、CreateTaskReferenceResolver、pending失败/跳过方法、Prompt消息和JDK List；未新增依赖、解析器或协议。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增helper均低于50行和复杂度20，控制块有大括号，布尔方法使用is前缀；未新增集合null、通配/static import、JSON字段或共享可变状态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "失败沿用现有英文技术日志和安全业务码，不新增用户原文、模型名、异常正文或敏感输出；诊断日志已撤回，失败不伪装成功。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "非法corrected批次不出现类型/补偿/确认卡，FAILED与UNRESOLVED的内部工具结果JSON均不上屏；前端文件和用户文案未改。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "只读run现有extra标记，合法创建才进入preflight/HITL，非法批首项失败其余跳过且无官方下一跳；未新增模型调用、Redis键、数据库访问或改变取消拒绝终态。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "只处理完整Prompt消息、JSON参数和ChatResponse metadata，未改字节流、SSE分片、UTF-8、代理对或截断；合成returnDirect文本在消费边界被抑制。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "缺type真实RED复现5分钟官方续轮，其他工具/resolution FAILED/多工具经反向变异均获独立RED，恢复后逐方法GREEN；旧多动作、guard、完整取消拒绝、原句型、旧缺type/FAILED及两种reasoning对照均1/1通过。生产IDEA Reformat和Maven compile通过；未运行类/套件、真实模型或服务。"
+        }
+      }
     }
   ]
 }

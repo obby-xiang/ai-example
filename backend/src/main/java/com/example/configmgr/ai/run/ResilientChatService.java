@@ -1754,7 +1754,7 @@ public class ResilientChatService {
     }
 
     /** 首轮 create_task 引用未决补全的 run 级事实；旧 createTaskCorrection* 兼容键不参与判定。 */
-    static final String CREATE_ENTRY_CORRECTION_MARKER = "createEntryCorrectionUsed";
+    public static final String CREATE_ENTRY_CORRECTION_MARKER = "createEntryCorrectionUsed";
 
     private boolean createEntryCorrectionDue(String runId, AiContext fallback, boolean originalFirstTurn) {
         RunSnapshot snapshot = requireCreateEntryCorrectionAllowed(runId);

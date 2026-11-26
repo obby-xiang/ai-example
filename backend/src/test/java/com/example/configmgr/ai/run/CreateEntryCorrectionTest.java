@@ -150,8 +150,8 @@ class CreateEntryCorrectionTest {
     @Test
     void boundTaskOrAnyCreateTaskRecordSuppressesCorrection() {
         AiContext bound = AiContext.of("export", "EXPORT", "SELECT_DEFS", 42L, "ACTIVE", Map.of());
-        assertThat(ResilientChatService.needsCreateEntryCorrection(true, bound, true, List.of(), List.of(), false))
-                .isFalse();
+        assertThat(ResilientChatService.needsCreateEntryCorrection(true, bound, true, List.of(unresolved()),
+                List.of(), false)).isFalse();
 
         PendingToolCall rejected = pending(PendingToolCall.REJECTED);
         assertThat(ResilientChatService.needsCreateEntryCorrection(true, tasks("EXPORT"), true, List.of(rejected),
@@ -165,12 +165,13 @@ class CreateEntryCorrectionTest {
 
     @Test
     void resumedUndisclosedOrAlreadyCorrectedTurnSuppressesCorrection() {
-        assertThat(ResilientChatService.needsCreateEntryCorrection(false, tasks("EXPORT"), true, List.of(), List.of(),
-                false)).isFalse();
-        assertThat(ResilientChatService.needsCreateEntryCorrection(true, tasks("IMPORT"), false, List.of(), List.of(),
-                false)).isFalse();
-        assertThat(ResilientChatService.needsCreateEntryCorrection(true, tasks("EXPORT"), true, List.of(), List.of(),
-                true)).isFalse();
+        PendingToolCall unresolved = unresolved();
+        assertThat(ResilientChatService.needsCreateEntryCorrection(false, tasks("EXPORT"), true,
+                List.of(unresolved), List.of(), false)).isFalse();
+        assertThat(ResilientChatService.needsCreateEntryCorrection(true, tasks("IMPORT"), false,
+                List.of(unresolved), List.of(), false)).isFalse();
+        assertThat(ResilientChatService.needsCreateEntryCorrection(true, tasks("EXPORT"), true,
+                List.of(unresolved), List.of(), true)).isFalse();
     }
 
     @Test

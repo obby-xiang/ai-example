@@ -33,6 +33,7 @@ import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.CorrectionPrefixes;
 import com.example.configmgr.ai.run.PendingToolCall;
+import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.RunParkedException;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
@@ -883,8 +884,12 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
         Map<String, Object> toolContext = toolContextOf(prompt);
         boolean suppressReasoning = toolContext != null && Boolean.TRUE.equals(toolContext.get(TOOL_CONTEXT_SUPPRESS_REASONING));
+        String turnReasoning = turnText == null ? "" : turnText.reasoningText();
+        if (suppressReasoning && StringUtils.isEmpty(turnReasoning)) {
+            turnReasoning = reasoningBeforeToolCall(prompt);
+        }
         assistant = assistantWithTurnContent(assistant, turnText == null ? "" : turnText.segmentText(),
-                turnText == null ? "" : turnText.reasoningText(), suppressReasoning);
+                turnReasoning, suppressReasoning);
 
         String runId = runIdOf(prompt);
         // 本轮权威执行信封：既用于快照恢复，也是租户/用户身份的第二来源（快照读不到时仍能恢复）。
@@ -996,6 +1001,10 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private void prepareBatch(ToolBatchState state, List<PendingToolCall> pendings,
                               Map<String, CreateTaskReferenceResolver.Resolution> createTaskResolutions) {
+        if (isCreateEntryCorrection(state.context)) {
+            prepareCorrectedCreateTaskBatch(state, pendings, createTaskResolutions);
+            return;
+        }
         PendingToolCall unresolved = pendings.stream().filter(pending -> {
             CreateTaskReferenceResolver.Resolution resolution = createTaskResolutions.get(pending.getToolCallId());
             return resolution != null && resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED;
@@ -1012,10 +1021,47 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
     }
 
+    private void prepareCorrectedCreateTaskBatch(ToolBatchState state, List<PendingToolCall> pendings,
+            Map<String, CreateTaskReferenceResolver.Resolution> createTaskResolutions) {
+        PendingToolCall candidate = pendings.getFirst();
+        CreateTaskReferenceResolver.Resolution resolution = createTaskResolutions.get(candidate.getToolCallId());
+        if (pendings.size() == 1 && isResolvedCreateTask(candidate, resolution)) {
+            preparePending(state, candidate, 1, resolution);
+            return;
+        }
+        if (!isCreateTaskReferenceBlocked(candidate)) {
+            CreateTaskReferenceResolver.Resolution failure = resolution != null
+                    && resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED ? resolution
+                    : failedCreateTaskResolution(candidate);
+            blockCreateTaskReferences(state.runId, candidate, failure);
+        }
+        state.preflightBlocked.add(candidate.getToolCallId());
+        state.haltedBy = candidate;
+    }
+
+    private static boolean isResolvedCreateTask(PendingToolCall pending,
+            CreateTaskReferenceResolver.Resolution resolution) {
+        return TOOL_CREATE_TASK.equals(pending.getName())
+                && !com.example.configmgr.ai.form.TaskTypeForm.typeMissingOrInvalid(pending.getArguments())
+                && resolution != null && resolution.status() == CreateTaskReferenceResolver.Status.RESOLVED;
+    }
+
+    private static CreateTaskReferenceResolver.Resolution failedCreateTaskResolution(PendingToolCall pending) {
+        return new CreateTaskReferenceResolver.Resolution(CreateTaskReferenceResolver.Status.FAILED,
+                pending.getArguments(), List.of(), CreateTaskReferenceResolver.FAILED_CODE);
+    }
+
+    private static boolean isCreateEntryCorrection(AiContext context) {
+        Map<String, Object> extra = context == null ? null : context.getExtra();
+        return extra != null && Boolean.TRUE.equals(extra.get(ResilientChatService.CREATE_ENTRY_CORRECTION_MARKER));
+    }
+
     private void preparePending(ToolBatchState state, PendingToolCall pending, int batchSize,
                                 CreateTaskReferenceResolver.Resolution createTaskResolution) {
         blockCreateTaskReferencesIfDue(state, pending, createTaskResolution);
-        parkTaskTypeIfDue(state, pending, batchSize);
+        if (!isCreateEntryCorrection(state.context)) {
+            parkTaskTypeIfDue(state, pending, batchSize);
+        }
         if (isConditionRejected(state, pending, batchSize) || isPreflightBlocked(state, pending)
                 || isCreateTaskBlocked(state, pending) || isFrontendSkipped(state, pending)) {
             return;
@@ -1265,8 +1311,7 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private void executePending(ToolBatchState state, PendingToolCall pending, int batchSize) {
-        if (state.preflightBlocked.contains(pending.getToolCallId())
-                && CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode())) {
+        if (state.preflightBlocked.contains(pending.getToolCallId()) && isCreateTaskReferenceBlocked(pending)) {
             addPreflightBlockedResponse(state, pending);
             return;
         }
@@ -1517,14 +1562,13 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
         List<Message> nextModelHistory = CorrectionPrefixes.historyWithSingleCorrectionPrefix(budget.modelHistory(),
                 CorrectionPrefixes.correctionPrefix(state.snapshot));
-        boolean unresolvedCreateTask = pendings.stream().anyMatch(pending ->
-                CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode()));
+        boolean blockedCreateTask = pendings.stream().anyMatch(SpToolCallingManager::isCreateTaskReferenceBlocked);
         TurnTextCapture turnText = turnTextOf(state.prompt);
-        if (unresolvedCreateTask && turnText != null) {
+        if (blockedCreateTask && turnText != null) {
             turnText.suppressReturnDirectText();
         }
         return ToolExecutionResult.builder().conversationHistory(nextModelHistory)
-                .returnDirect(unresolvedCreateTask).build();
+                .returnDirect(blockedCreateTask).build();
     }
 
     private final class ToolBatchState {
@@ -4547,6 +4591,18 @@ public class SpToolCallingManager implements ToolCallingManager {
             builder.media(assistant.getMedia());
         }
         return builder.build();
+    }
+
+    /** 抑制当前工具分片的推理时，继承上一条 assistant 的推理；没有则返回空串。 */
+    private static String reasoningBeforeToolCall(Prompt prompt) {
+        List<Message> instructions = prompt.getInstructions();
+        for (int index = instructions.size() - 1; index >= 0; index--) {
+            if (instructions.get(index) instanceof AssistantMessage assistant) {
+                Object reasoning = assistant.getMetadata().get("reasoningContent");
+                return reasoning instanceof String text ? text : "";
+            }
+        }
+        return "";
     }
 
     /**
