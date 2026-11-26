@@ -56,6 +56,7 @@ public class ActionIntentParser {
      * Deliberately limited JSON Schema support, not a full JSON Schema validator. Unknown validation
      * keywords and validation-bearing nodes without a type fail closed. Annotation-only nodes are explicitly
      * unconstrained and delegate value validation to the existing business resolver/preflight.
+     * Object-form additionalProperties is unsupported and rejected rather than partially enforced.
      */
     private static final Set<String> SUPPORTED_SCHEMA_FIELDS = Set.of("$ref", "$defs", "$id", "$schema",
             "definitions", "type", "properties", "required", "additionalProperties", "items", "enum",
@@ -334,8 +335,7 @@ public class ActionIntentParser {
     }
 
     private static boolean isSupportedAdditionalPropertiesSchema(JsonNode schema) {
-        return schema.isMissingNode() || schema.isBoolean()
-                || schema.isObject() && hasSupportedSchemaFields(schema);
+        return schema.isMissingNode() || schema.isBoolean();
     }
 
     private static boolean matchesNode(JsonNode root, JsonNode schema, JsonNode value) {

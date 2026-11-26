@@ -8837,6 +8837,57 @@
           "reason": "未知type、缺失type、非对象items均取得expected FAILED but was PARSED的真实RED后逐方法GREEN；真实create_task Schema先FAIL再GREEN，首次表单回归通过。真实form和Future时序测试在既有修复上直接PASS，未伪造新生产RED； Future包装失败和固定计数假设作为夹具调试记录。生产IDEA Reformat、IDEA定点编译、Maven compile及Checkstyle 0均成功；未运行类/套件、真实模型或服务。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:79f615fd20c5deb303495114105ee7341e83a48e4c3543d94825b21ab90b762a",
+      "status": "reviewed",
+      "reason": "对最终复审最小修复逐hunk复核：ActionIntentParser不再接受对象形式additionalProperties，避免受限校验器只处理布尔false却声称对象约束已执行；缺失和布尔true/false保持原语义，真实create_task的additionalProperties=false继续通过。新增测试先证明额外defCodes违反对象约束仍被PARSED，再验证FAILED。",
+      "reviewedAt": "2026-11-26T12:47:35+08:00",
+      "reviewer": "Kimi Code Task 2最终复审修复静态逐hunk自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "受限Schema校验器将对象形式additionalProperties明确列为不支持并失败关闭，不再进入未实现的额外字段对象校验。",
+          "reason": "原实现接受对象schema但matchesObject只执行布尔false，导致额外字段约束被静默忽略；本批不新增完整Schema框架。",
+          "impact": "仅收紧专注解析的畸形或超出能力Schema；缺失additionalProperties、布尔true/false及真实create_task Schema保持原行为。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/intent/ActionIntentParser.java",
+          "status": "checked",
+          "reason": "isSupportedAdditionalPropertiesSchema仅接受缺失或布尔值，对象形式在matchesNode前失败；类注释明确该约束不受支持，其他受限Schema逻辑未改。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "仅使用既有JsonNode布尔/缺失判断，未引入JSON Schema依赖、校验框架或新工具库。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "修改后的helper保持单行受限判断和低复杂度，未新增集合、布尔getter、控制块、通配import或可变共享状态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "不支持对象约束通过既有INVALID_ACTION_ARGUMENTS真实失败，不吞异常、不伪装PARSED；未新增日志或敏感输出。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本轮只调整parser内部Schema准入，未修改表单、卡片、前端文案或向导。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "not-affected",
+          "reason": "本轮不触及模型调用时序、取消状态机、Redis、数据库或运行时传递，仅收缩完整JSON参数的本地校验范围。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "对象additionalProperties在完整JsonNode结构检查阶段被拒绝，不处理字节流、SSE分片、代理对或截断；既有严格尾随token语义不变。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "新增对象约束违规方法先取得expected FAILED but was PARSED的真实RED，再独立GREEN；真实create_task Schema独立回归GREEN。生产IDEA Reformat、IDEA定点编译和Maven compile成功，定向Checkstyle 0；未运行类/套件、真实模型或服务。"
+        }
+      }
     }
   ]
 }

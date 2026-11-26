@@ -240,6 +240,18 @@ class ActionIntentParserTest {
     }
 
     @Test
+    void rejectsObjectAdditionalPropertiesSchemaInsteadOfIgnoringIt() throws Exception {
+        ActionIntentParser.Request request = requestWithSchema("{\"type\":\"object\",\"properties\":{"
+                + "\"type\":{\"type\":\"string\"}},\"required\":[\"type\"],"
+                + "\"additionalProperties\":{\"type\":\"object\"}}");
+
+        ActionIntentParser.Result result = parseWithRequest(plan("{\"type\":\"EXPORT\",\"defCodes\":[]}"), request);
+
+        assertThat(result.status()).isEqualTo(ActionIntentParser.Status.FAILED);
+        assertThat(result.failureCode()).isEqualTo(ActionIntentParser.INVALID_ACTION_ARGUMENTS);
+    }
+
+    @Test
     void currentCreateTaskSchemaUsesTheDocumentedSubset() {
         ToolDefinition definition = java.util.Arrays.stream(MethodToolCallbackProvider.builder()
                 .toolObjects(new AiTools(null, null, null)).build().getToolCallbacks())
