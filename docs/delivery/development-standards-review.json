@@ -9436,6 +9436,67 @@
           "reason": "corrected fields=[]与显式defCodes=[]均先取得行为RED再GREEN；REGION/R1以旧guard单次回放取得RED后恢复当前实现GREEN；多定义旧夹具先证明意外findByCode交互，最终双code文本GREEN。含空/多scope、空对象、无唯一rowKey及非空fields回归共9个方法逐方法通过。IDEA Reformat成功，方法测试实际编译364个生产源文件且最终Maven compile成功；未运行类/套件、真实模型或服务。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:9f81e4da65130e1e9b4426b387ccf7c3b4b38715e3f4f61df2432c2a2f2e9b6f",
+      "status": "reviewed",
+      "reason": "逐段审查两份新增Markdown的最终架构、历史裁决、真实验收表和NOT_RUN清单：ActionIntentParser/ActionPlan/submit_action_plan/CREATE_TASK_DETAILS只作为被否决方案出现，当前事实统一为CreateTaskReferenceResolver、真实主键归一、CreateTaskEvidenceResolver及单次correction后备；三轮PASS逐项对应仓外报告，未将其他场景或独立runs列表400写成已通过。仓外绝对路径按pre-commit规则改为尖括号证据占位符，实际报告位置仍由本次交付记录提供。",
+      "reviewedAt": "2026-11-26T22:42:59+08:00",
+      "reviewer": "Kimi Code最终交付文档逐hunk自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "设计和实施计划从早期通用actions[]解析方案更新为实际交付的引用解析、真实主键归一、确定性证据与单次correction后备。",
+          "reason": "旧文档描述的是未实施的失败/否决路线，继续保留会错误引导后续维护者恢复ActionIntentParser和多动作协议。",
+          "impact": "仅文档口径变化，生产协议和代码不变；历史失败及否决原因保留，最终结构、Prompt临时标记、永久used、帧/history和空条件边界以38e8baab为准。"
+        },
+        {
+          "change": "验收状态更新为指定HEAD的真实三轮3/3 PASS，并分别列出run/session、task/job、canonical、两个HITL、CNY文件和刷新一致性。",
+          "reason": "仓外报告已经提供真实上游三轮证据，最终文档需要区分该证据与此前逐方法/协议桩结果。",
+          "impact": "PASS只覆盖导出cny货币字典三轮现场；多动作、全量测试、真实Redis Cluster、多实例、CI及其他端到端场景均明确NOT_RUN，runs列表400单列为独立环境问题。"
+        }
+      ],
+      "files": [
+        {
+          "path": "docs/superpowers/plans/2026-11-26-generic-action-intent-resolution.md",
+          "status": "checked",
+          "reason": "实施计划改为六项已完成交付记录，删除子代理实施和推送要求，保留早期方案取舍，并将真实三轮、NOT_RUN和独立环境问题逐项落表。"
+        },
+        {
+          "path": "docs/superpowers/specs/2026-11-26-generic-action-intent-resolution-design.md",
+          "status": "checked",
+          "reason": "设计正文完整描述最终解析顺序、唯一主键和rowKey边界、显式空defCodes、scope、correction帧/history语义，并以真实报告限定3/3 PASS的适用范围。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "两份变更均为Markdown交付说明，未修改manifest、锁文件、imports或工具库，文档中的组件名称不会新增运行依赖。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "未修改Java源码、注解、集合或JSON实体；CreateTaskReferenceResolver等名称仅用于说明既有最终实现，不触发Java方法或API变化。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "文档只概述runs列表400和Jackson反序列化问题并指向仓外报告，未复制原始堆栈、上游响应或敏感配置，也未把该异常包装成功。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "文档按报告记录创建与启动两个HITL、7张工具卡及history刷新一致，无新增前端文案或卡片；未宣称其他交互场景已验证。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "最终说明准确区分Prompt临时标记、永久used、初始帧抑制与Redis/history保留，明确多动作、真实Redis Cluster和多实例NOT_RUN，未修改运行协议或状态。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批只编辑中文Markdown，未修改字节流、SSE、JSON分帧、代理对或截断逻辑，文档未提出新的流式解析行为。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "本次仅文档收尾，按禁令测试、CU和子代理均NOT_RUN；三轮3/3 PASS来自<deepseek-evidence-cny-38e8baab>/report.md的既有真实证据，不声称本轮重新执行。两份文档已逐段审查且git diff --cached --check通过，其他场景与CI不外推。"
+        }
+      }
     }
   ]
 }
