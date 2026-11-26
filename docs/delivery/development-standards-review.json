@@ -8781,6 +8781,62 @@
           "reason": "七个修复测试均先取得真实RED再逐方法GREEN，另有六个成功/超时/caller interrupt/首次表单/Schema ref回归方法逐方法通过；生产IDEA Reformat ok，最终实际编译366源及定向Checkstyle 0。clean compile因既有进程锁定config-mgr.jar失败后，普通compile已重新编译全部366源并成功；未运行类/套件、真实模型或服务，修复证据追加到仓外Task 2报告。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:fa3a88254075d31ad04e53490b5a78751ad82fba935e30024abdae5db6c65cfd",
+      "status": "reviewed",
+      "reason": "对Task 2二次复审的唯一生产变更ActionIntentParser逐hunk复核：未知type、缺失type的校验承载节点、非对象items及非对象properties/$defs容器均失败关闭；真实create_task的value只有description且无校验关键词，作为通用无约束节点显式交给既有业务resolver/preflight，不按业务名特判。两个测试类分别改用真实CreateTaskDetailsForm spy和受控Future/真实registry spy，未新增生产测试hook。",
+      "reviewedAt": "2026-11-26T12:35:59+08:00",
+      "reviewer": "Kimi Code Task 2二次复审修复静态逐hunk自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "受限Schema校验拒绝未知type、带校验关键词但缺type的节点、非对象items和非法子schema容器；只有含纯注解且完全不含校验关键词的节点才明确无约束并转交既有业务校验。",
+          "reason": "原default=true和items非对象早退会fail-open；真实create_task的conditions.fields.value允许文本/数字/数组，必须显式保留这一无约束边界，同时不能把空Schema或校验节点当作已验证。",
+          "impact": "仅影响专注解析的当前工具参数准入；真实create_task Schema成功路径保留，未知约束和畸形Schema仍失败，业务定义/字段/枚举/真实值核验职责不变。"
+        },
+        {
+          "change": "二次未决测试改为真实CreateTaskDetailsForm对象spy；返回后取消测试通过受控Future确认ChatModel返回且Future.get交付完成后才触发真实CancellationRegistry取消。",
+          "reason": "mock form不能提供真实对象证据，模型return前取消也不能证明结果接受窗口；本轮只修正测试证据，不新增生产测试hook或改变既有生产语义。",
+          "impact": "二次UNRESOLVED仍FAILED且零表单/HITL；结果接受后取消仍CANCELLED且listener注销；首次未决表单行为不变。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/intent/ActionIntentParser.java",
+          "status": "checked",
+          "reason": "核对hasSupportedSchemaFields对对象/容器的递归约束、items与additionalProperties的分别校验、matchesType缺省/非文本/未知值失败，以及isExplicitlyUnconstrained只接受纯注解节点并交给下游业务校验。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "继续使用既有Jackson JsonNode、JDK集合和真实业务resolver/preflight；测试只复用项目Mockito spy和JDK Future，没有新增依赖或框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增helper均低于50行和复杂度20，控制块有大括号，集合内容不可变；未新增JSON字段、布尔getter、通配import或共享可变状态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "畸形类型、缺失type和非对象items返回既有INVALID_ACTION_ARGUMENTS，不把异常吞成PARSED；未新增日志、上游正文或敏感输出。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "真实form spy证明二次未决零补充卡和零创建确认，首次未决表单回归保持；本轮未修改前端、用户文案或向导。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "受控Future证明模型返回和Future.get交付后才触发真实onCancel，结果为零HITL且listener注销；未改生产并发、Redis键、AI数据库或取消状态机。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "本批只校验完整JsonNode结构和类型，不处理字节流、SSE分片、代理对或截断；尾随token与多choices仍沿用上一修复拒绝。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "未知type、缺失type、非对象items均取得expected FAILED but was PARSED的真实RED后逐方法GREEN；真实create_task Schema先FAIL再GREEN，首次表单回归通过。真实form和Future时序测试在既有修复上直接PASS，未伪造新生产RED； Future包装失败和固定计数假设作为夹具调试记录。生产IDEA Reformat、IDEA定点编译、Maven compile及Checkstyle 0均成功；未运行类/套件、真实模型或服务。"
+        }
+      }
     }
   ]
 }

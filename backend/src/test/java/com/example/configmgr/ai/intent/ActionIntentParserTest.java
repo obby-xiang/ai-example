@@ -2,6 +2,7 @@ package com.example.configmgr.ai.intent;
 
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.slot.SlotDefinition;
+import com.example.configmgr.ai.tools.AiTools;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -15,6 +16,7 @@ import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
+import org.springframework.ai.tool.method.MethodToolCallbackProvider;
 
 import java.util.List;
 import java.util.Map;
@@ -205,6 +207,54 @@ class ActionIntentParserTest {
     }
 
     @Test
+    void rejectsUnknownSchemaType() throws Exception {
+        ActionIntentParser.Request request = requestWithSchema("{\"type\":\"object\",\"properties\":{"
+                + "\"type\":{\"type\":\"text\"}},\"required\":[\"type\"]}");
+
+        ActionIntentParser.Result result = parseWithRequest(plan("{\"type\":\"EXPORT\",\"defCodes\":[]}"), request);
+
+        assertThat(result.status()).isEqualTo(ActionIntentParser.Status.FAILED);
+        assertThat(result.failureCode()).isEqualTo(ActionIntentParser.INVALID_ACTION_ARGUMENTS);
+    }
+
+    @Test
+    void rejectsMissingSchemaType() throws Exception {
+        ActionIntentParser.Request request = requestWithSchema("{\"type\":\"object\",\"properties\":{"
+                + "\"defCodes\":{\"items\":{\"type\":\"string\"}}},\"required\":[\"defCodes\"]}");
+
+        ActionIntentParser.Result result = parseWithRequest(plan("{\"type\":\"EXPORT\",\"defCodes\":[]}"), request);
+
+        assertThat(result.status()).isEqualTo(ActionIntentParser.Status.FAILED);
+        assertThat(result.failureCode()).isEqualTo(ActionIntentParser.INVALID_ACTION_ARGUMENTS);
+    }
+
+    @Test
+    void rejectsNonObjectItemsSchema() throws Exception {
+        ActionIntentParser.Request request = requestWithSchema("{\"type\":\"object\",\"properties\":{"
+                + "\"defCodes\":{\"type\":\"array\",\"items\":\"string\"}},\"required\":[\"defCodes\"]}");
+
+        ActionIntentParser.Result result = parseWithRequest(plan("{\"type\":\"EXPORT\",\"defCodes\":[]}"), request);
+
+        assertThat(result.status()).isEqualTo(ActionIntentParser.Status.FAILED);
+        assertThat(result.failureCode()).isEqualTo(ActionIntentParser.INVALID_ACTION_ARGUMENTS);
+    }
+
+    @Test
+    void currentCreateTaskSchemaUsesTheDocumentedSubset() {
+        ToolDefinition definition = java.util.Arrays.stream(MethodToolCallbackProvider.builder()
+                .toolObjects(new AiTools(null, null, null)).build().getToolCallbacks())
+                .map(ToolCallback::getToolDefinition).filter(tool -> "create_task".equals(tool.name()))
+                .findFirst().orElseThrow();
+        this.chatModel = prompt -> response(VALID_PLAN, null);
+
+        ActionIntentParser.Result result = parser().parse(new ActionIntentParser.Request("导出cny货币字典",
+                definition, ORIGINAL), runtime(this.chatModel));
+
+        assertThat(result.status()).as("real create_task schema: %s", definition.inputSchema())
+                .isEqualTo(ActionIntentParser.Status.PARSED);
+    }
+
+    @Test
     void planningCallbackCannotExecuteAnInternalAction() {
         AtomicInteger executions = new AtomicInteger();
         this.chatModel = prompt -> {
@@ -269,6 +319,11 @@ class ActionIntentParserTest {
                         new SlotDefinition.SlotField("code", "货币代码", true, List.of("CNY", "USD")))),
                 new SlotDefinition("LANGUAGE", "语言字典", List.of(
                         new SlotDefinition.SlotField("code", "语言代码", true, List.of())))));
+    }
+
+    private static ActionIntentParser.Request requestWithSchema(String schema) {
+        return new ActionIntentParser.Request("导出cny货币字典", ToolDefinition.builder()
+                .name("create_task").description("创建任务").inputSchema(schema).build(), ORIGINAL);
     }
 
     private static ActionIntentParser.Request request() {

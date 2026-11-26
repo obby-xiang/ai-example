@@ -54,11 +54,18 @@ public class ActionIntentParser {
 
     /**
      * Deliberately limited JSON Schema support, not a full JSON Schema validator. Unknown validation
-     * keywords fail closed; business references and values are still resolved by CreateTaskReferenceResolver.
+     * keywords and validation-bearing nodes without a type fail closed. Annotation-only nodes are explicitly
+     * unconstrained and delegate value validation to the existing business resolver/preflight.
      */
     private static final Set<String> SUPPORTED_SCHEMA_FIELDS = Set.of("$ref", "$defs", "$id", "$schema",
             "definitions", "type", "properties", "required", "additionalProperties", "items", "enum",
             "description", "title", "default", "examples", "deprecated", "readOnly", "writeOnly");
+
+    private static final Set<String> SCHEMA_VALIDATION_FIELDS = Set.of("$ref", "type", "properties", "required",
+            "additionalProperties", "items", "enum");
+
+    private static final Set<String> SCHEMA_ANNOTATION_FIELDS = Set.of("description", "title", "default",
+            "examples", "deprecated", "readOnly", "writeOnly");
 
     private static final String PLANNING_SCHEMA = """
             {"type":"object","properties":{"actions":{"type":"array","minItems":1,"items":{
@@ -299,17 +306,20 @@ public class ActionIntentParser {
     }
 
     private static boolean hasSupportedSchemaFields(JsonNode schema) {
-        return hasOnlyFields(schema, SUPPORTED_SCHEMA_FIELDS)
+        return schema.isObject() && hasOnlyFields(schema, SUPPORTED_SCHEMA_FIELDS)
                 && hasSupportedSchemaChildren(schema.path("properties"))
                 && hasSupportedSchemaChildren(schema.path("$defs"))
                 && hasSupportedSchemaChildren(schema.path("definitions"))
-                && isSupportedSchemaChild(schema.path("items"))
-                && isSupportedSchemaChild(schema.path("additionalProperties"));
+                && isSupportedItemsSchema(schema.path("items"))
+                && isSupportedAdditionalPropertiesSchema(schema.path("additionalProperties"));
     }
 
     private static boolean hasSupportedSchemaChildren(JsonNode container) {
-        if (!container.isObject()) {
+        if (container.isMissingNode()) {
             return true;
+        }
+        if (!container.isObject()) {
+            return false;
         }
         for (JsonNode child : container) {
             if (!hasSupportedSchemaFields(child)) {
@@ -319,11 +329,19 @@ public class ActionIntentParser {
         return true;
     }
 
-    private static boolean isSupportedSchemaChild(JsonNode schema) {
-        return schema.isMissingNode() || !schema.isObject() || hasSupportedSchemaFields(schema);
+    private static boolean isSupportedItemsSchema(JsonNode schema) {
+        return schema.isMissingNode() || schema.isObject() && hasSupportedSchemaFields(schema);
+    }
+
+    private static boolean isSupportedAdditionalPropertiesSchema(JsonNode schema) {
+        return schema.isMissingNode() || schema.isBoolean()
+                || schema.isObject() && hasSupportedSchemaFields(schema);
     }
 
     private static boolean matchesNode(JsonNode root, JsonNode schema, JsonNode value) {
+        if (isExplicitlyUnconstrained(schema)) {
+            return true;
+        }
         if (schema.has("$ref")) {
             String reference = schema.path("$ref").asText();
             if (!reference.startsWith("#/")) {
@@ -338,9 +356,16 @@ public class ActionIntentParser {
         return matchesObject(root, schema, value) && matchesArray(root, schema, value);
     }
 
+    private static boolean isExplicitlyUnconstrained(JsonNode schema) {
+        if (!SCHEMA_ANNOTATION_FIELDS.stream().anyMatch(schema::has)) {
+            return false;
+        }
+        return SCHEMA_VALIDATION_FIELDS.stream().noneMatch(schema::has);
+    }
+
     private static boolean matchesType(JsonNode type, JsonNode value) {
         if (type.isMissingNode()) {
-            return true;
+            return false;
         }
         if (type.isArray()) {
             for (JsonNode candidate : type) {
@@ -348,6 +373,9 @@ public class ActionIntentParser {
                     return true;
                 }
             }
+            return false;
+        }
+        if (!type.isTextual()) {
             return false;
         }
         return switch (type.asText()) {
@@ -358,7 +386,7 @@ public class ActionIntentParser {
             case "number" -> value.isNumber();
             case "boolean" -> value.isBoolean();
             case "null" -> value.isNull();
-            default -> true;
+            default -> false;
         };
     }
 
@@ -402,8 +430,11 @@ public class ActionIntentParser {
     }
 
     private static boolean matchesArray(JsonNode root, JsonNode schema, JsonNode value) {
-        if (!value.isArray() || !schema.path("items").isObject()) {
+        if (!value.isArray()) {
             return true;
+        }
+        if (!schema.path("items").isObject()) {
+            return false;
         }
         for (JsonNode entry : value) {
             if (!matchesNode(root, schema.path("items"), entry)) {

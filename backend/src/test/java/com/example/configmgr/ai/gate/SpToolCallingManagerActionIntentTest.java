@@ -63,13 +63,16 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -218,7 +221,8 @@ class SpToolCallingManagerActionIntentTest {
 
     @Test
     void stillUnresolvedAfterOneParseDoesNotReachHitlOrTriggerAnotherParse() {
-        CreateTaskDetailsForm detailsForm = mock(CreateTaskDetailsForm.class);
+        CreateTaskDetailsForm detailsForm = spy(new CreateTaskDetailsForm(this.store, this.registry, this.gate,
+                mock(MessageJsonCodec.class), this.properties));
         this.manager.setCreateTaskDetailsForm(detailsForm);
         installModel("{\"actions\":[{\"id\":\"a1\",\"tool\":\"create_task\",\"arguments\":"
                 + "{\"type\":\"EXPORT\",\"defCodes\":[\"仍未知\"],\"conditions\":{}},"
@@ -365,21 +369,48 @@ class SpToolCallingManagerActionIntentTest {
 
     @Test
     void realCancellationAfterModelReturnRejectsPlanBeforePreflight() {
-        CancellationRegistry cancellations = installRealCancellationRegistry();
+        this.properties.getTool().setExecTimeout(Duration.ofSeconds(2));
+        CancellationRegistry cancellations = spy(installRealCancellationRegistry());
+        ReflectionTestUtils.setField(this.manager, "cancellations", cancellations);
+        ExecutorService parserExecutor = spy(Executors.newSingleThreadExecutor());
+        ReflectionTestUtils.setField(this.manager, "toolTimeoutExecutor", parserExecutor);
+        AtomicReference<Future<?>> parserFuture = new AtomicReference<>();
+        AtomicBoolean modelReturned = new AtomicBoolean();
+        AtomicBoolean futureDelivered = new AtomicBoolean();
+        AtomicBoolean cancelTriggered = new AtomicBoolean();
+        doAnswer(invocation -> {
+            Future<?> future = (Future<?>) invocation.callRealMethod();
+            Future<?> observed = new ObservedFuture<>(future, futureDelivered);
+            parserFuture.set(observed);
+            return observed;
+        }).when(parserExecutor).submit(any(java.util.concurrent.Callable.class));
+        doAnswer(invocation -> {
+            Future<?> future = parserFuture.get();
+            if (modelReturned.get() && futureDelivered.get() && future != null && future.isDone()
+                    && cancelTriggered.compareAndSet(false, true)) {
+                cancellations.cancel(RUN_ID, "test-cancel-after-future");
+            }
+            return invocation.callRealMethod();
+        }).when(cancellations).cancelState(RUN_ID);
         try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
             cancellations.register(RUN_ID);
             this.chatModel = prompt -> {
                 this.modelCalls.incrementAndGet();
-                try (RequestContextUtils.SafeCloseable workerIdentity = RequestContextUtils.useContext(1L, 101L)) {
-                    cancellations.cancel(RUN_ID, "test-cancel-after-model");
-                }
-                return parserResponse(PARSED_PLAN);
+                ChatResponse response = parserResponse(PARSED_PLAN);
+                modelReturned.set(true);
+                return response;
             };
 
-            assertThatThrownBy(() -> execute(ORIGINAL, List.of(new UserMessage("导出cny货币字典"))))
+            Throwable thrown = catchThrowable(() -> execute(ORIGINAL, List.of(new UserMessage("导出cny货币字典"))));
+            assertThat(thrown).withFailMessage("modelReturned=%s futureDelivered=%s future=%s", modelReturned.get(),
+                            futureDelivered.get(), parserFuture.get())
                     .isInstanceOfSatisfying(StreamViolationException.class,
                             ex -> assertThat(ex.getCode()).isEqualTo(StreamViolationException.CANCELLED));
             assertThat(this.modelCalls).hasValue(1);
+            assertThat(futureDelivered).as("controlled Future.get must return before cancellation").isTrue();
+            assertThat(cancelTriggered).isTrue();
+            assertThat(modelReturned).isTrue();
+            assertThat(parserFuture.get().isDone()).isTrue();
             assertThat(cancellations.status(RUN_ID)).containsEntry("listeners", 0);
             verifyNoInteractions(this.preflight);
             verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
@@ -494,6 +525,48 @@ class SpToolCallingManagerActionIntentTest {
             assertThat(ex.getCause()).isInstanceOf(StreamViolationException.class);
             assertThat(((StreamViolationException) ex.getCause()).getCode())
                     .isEqualTo(StreamViolationException.CANCELLED);
+        }
+    }
+
+    private static final class ObservedFuture<T> implements Future<T> {
+
+        private final Future<T> delegate;
+
+        private final AtomicBoolean delivered;
+
+        private ObservedFuture(Future<T> delegate, AtomicBoolean delivered) {
+            this.delegate = delegate;
+            this.delivered = delivered;
+        }
+
+        @Override
+        public boolean cancel(boolean mayInterruptIfRunning) {
+            return this.delegate.cancel(mayInterruptIfRunning);
+        }
+
+        @Override
+        public boolean isCancelled() {
+            return this.delegate.isCancelled();
+        }
+
+        @Override
+        public boolean isDone() {
+            return this.delegate.isDone();
+        }
+
+        @Override
+        public T get() throws InterruptedException, ExecutionException {
+            T result = this.delegate.get();
+            this.delivered.set(true);
+            return result;
+        }
+
+        @Override
+        public T get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException,
+                java.util.concurrent.TimeoutException {
+            T result = this.delegate.get(timeout, unit);
+            this.delivered.set(true);
+            return result;
         }
     }
 
