@@ -3,6 +3,7 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
+import com.example.configmgr.ai.config.ConcurrencyLimitedChatModel;
 import com.example.configmgr.ai.config.EmptyLengthReasoningRecovery;
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.context.ContextBreakdownService;
@@ -89,7 +90,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.regex.Pattern;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -676,8 +676,7 @@ public class ResilientChatService {
                 setup.runtime().providerId(), setup.runtime().modelId(), frozenParams(setup.runtime(), setup.isParamsLocked()),
                 setup.runtime().options().getExtraBody(), setup.request().clientRequestId(), setup.transcriptText(),
                 setup.turnStartedAtMs(), setup.runtime().options().getReasoningEffort(), recovery,
-                setup.runtime().chatModel() instanceof org.springframework.ai.openai.ReasoningAwareOpenAiChatModel reasoningModel
-                        && reasoningModel.isReasoningReplayEnabled());
+                Boolean.TRUE.equals(ConcurrencyLimitedChatModel.getReasoningReplayEnabled(setup.runtime().chatModel())));
         recordTranscriptUser(runId, setup.sessionId(), setup.transcriptText(), setup.turnStartedAtMs());
         return new FirstTurnExecution(false, compaction, snapshot, full, recovery);
     }
@@ -770,7 +769,7 @@ public class ResilientChatService {
                                 .user(setup.request().message())
                                 .advisors(advisors -> advisors.param(ChatMemory.CONVERSATION_ID, setup.sessionId()))
                                 .toolContext(toolContext(runId, setup.sessionId(), execution.snapshot(), out.lastIssuedSeq(),
-                                        turnTextBody));
+                                        turnTextBody, selected));
                         var withTools = setup.tools().isEmpty() ? spec : spec.toolCallbacks(setup.tools());
                         return withTools.stream().chatResponse();
                     });
@@ -1257,7 +1256,7 @@ public class ResilientChatService {
         options.setToolCallbacks(toolsAllowed ? this.toolRegistry.forContext(context) : List.of());
         options.setInternalToolExecutionEnabled(true);
         // A：续跑与首轮同构 —— runId/sessionId 原样保留，另带本轮权威执行信封。
-        options.setToolContext(toolContext(runId, sessionId, snapshot, seqFloor, turnTextBody));
+        options.setToolContext(toolContext(runId, sessionId, snapshot, seqFloor, turnTextBody, runtime));
         return new Prompt(history, options);
     }
 
@@ -1266,12 +1265,16 @@ public class ResilientChatService {
      * <b>权威执行信封</b>（{@link ToolExecutionEnvelope#TOOL_CONTEXT_KEY}）—— 执行点据此在快照
      * 读不到时原地恢复运行事实，而不是回落"绕过确认门"的官方默认执行。
      *
-     * <p>{@code snapshot == null}（旧轮/读失败）或 envelope 构造不出时只保留原有两项：
-     * 缺信封与"没带信封的旧版本"同语义，不阻断请求。
+     * <p>本轮 {@link ProviderRuntime} 只作为进程内工具上下文供未决参数解析使用，不进入快照、历史或 SSE。
+     * {@code snapshot == null}（旧轮/读失败）或 envelope 构造不出时缺少的只是信封，不阻断请求。
      */
     private static Map<String, Object> toolContext(String runId, String sessionId, RunSnapshot snapshot, long seqFloor,
-                                                   SpToolCallingManager.TurnTextCapture turnTextBody) {
+                                                   SpToolCallingManager.TurnTextCapture turnTextBody,
+                                                   ProviderRuntime runtime) {
         Map<String, Object> context = new LinkedHashMap<>();
+        if (runtime != null) {
+            context.put(SpToolCallingManager.TOOL_CONTEXT_PROVIDER_RUNTIME, runtime);
+        }
         context.put("runId", runId);
         context.put("sessionId", sessionId);
         context.put(PendingToolCall.CREATED_TASK_ID, new AtomicReference<Long>());

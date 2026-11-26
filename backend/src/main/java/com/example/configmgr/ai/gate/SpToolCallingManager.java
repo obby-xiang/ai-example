@@ -4,6 +4,7 @@ import com.example.configmgr.common.AiStateUnavailableException;
 import com.example.configmgr.common.ErrorCodes;
 
 import com.example.configmgr.ai.config.AiProperties;
+import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.context.CompactionFuse;
 import com.example.configmgr.ai.context.ContextEstimator;
 import com.example.configmgr.ai.context.ContextLimitResolver;
@@ -23,6 +24,7 @@ import com.example.configmgr.ai.history.TranscriptEntry;
 import com.example.configmgr.ai.form.ConditionsForm;
 import com.example.configmgr.ai.form.FormIssue;
 import com.example.configmgr.ai.history.SyntheticMessages;
+import com.example.configmgr.ai.intent.ActionIntentParser;
 import com.example.configmgr.ai.form.GenerativeFormRules;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.memory.ReasoningOrigin;
@@ -94,7 +96,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -104,7 +106,6 @@ import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 官方循环内的工具执行扩展点（S4.2 §2 {@code gate/SpToolCallingManager}）。
@@ -242,6 +243,8 @@ public class SpToolCallingManager implements ToolCallingManager {
      * 也不能让一次调用脱离超时笼（N3）。
      */
     private static final int TOOL_TIMEOUT_THREADS_DEFAULT = 20;
+
+    private static final Duration INTENT_FALLBACK_TIMEOUT = Duration.ofSeconds(30);
 
     private static final RunIdentityScope.Scope NO_RECORD_SCOPE = () -> {
     };
@@ -462,6 +465,13 @@ public class SpToolCallingManager implements ToolCallingManager {
     @Autowired(required = false)
     public void setCreateTaskReferenceResolver(CreateTaskReferenceResolver resolver) {
         this.createTaskReferenceResolver = resolver;
+    }
+
+    private ActionIntentParser actionIntentParser;
+
+    @Autowired(required = false)
+    public void setActionIntentParser(ActionIntentParser parser) {
+        this.actionIntentParser = parser;
     }
 
     private com.example.configmgr.ai.form.CreateTaskDetailsForm createTaskDetailsForm;
@@ -718,6 +728,8 @@ public class SpToolCallingManager implements ToolCallingManager {
      */
     public static final String TOOL_CONTEXT_REPLY_LOCALE = "replyLocale";
 
+    public static final String TOOL_CONTEXT_PROVIDER_RUNTIME = "turnProviderRuntime";
+
     /**
      * 本轮<b>当前 attempt 已聚合正文与推理段</b>的传播键：{@code ResilientChatService} 的累加器每消费一个
      * 正文或推理分片就追加到同一个 {@link TurnTextCapture}，本类在工具执行点读取，补全流式工具调用跳那条
@@ -953,7 +965,8 @@ public class SpToolCallingManager implements ToolCallingManager {
                                                                                     List<PendingToolCall> pendings) {
         Map<String, CreateTaskReferenceResolver.Resolution> resolutions = new LinkedHashMap<>();
         for (PendingToolCall pending : pendings) {
-            CreateTaskReferenceResolver.Resolution resolution = resolveCreateTaskReferences(runId, pending);
+            CreateTaskReferenceResolver.Resolution resolution = resolveCreateTaskReferences(runId, pending, prompt,
+                    pendings.size());
             if (resolution != null) {
                 resolutions.put(pending.getToolCallId(), resolution);
             }
@@ -965,19 +978,21 @@ public class SpToolCallingManager implements ToolCallingManager {
         return resolutions;
     }
 
-    private CreateTaskReferenceResolver.Resolution resolveCreateTaskReferences(String runId, PendingToolCall pending) {
+    private CreateTaskReferenceResolver.Resolution resolveCreateTaskReferences(String runId, PendingToolCall pending,
+                                                                               Prompt prompt, int batchSize) {
         if (!TOOL_CREATE_TASK.equals(pending.getName())
                 || com.example.configmgr.ai.form.TaskTypeForm.typeMissingOrInvalid(pending.getArguments())) {
             return null;
         }
         if (this.createTaskReferenceResolver == null) {
-            CreateTaskReferenceResolver.Resolution resolution = new CreateTaskReferenceResolver.Resolution(
-                    CreateTaskReferenceResolver.Status.FAILED, pending.getArguments(), List.of(),
-                    CreateTaskReferenceResolver.FAILED_CODE);
+            CreateTaskReferenceResolver.Resolution resolution = failedIntentResolution(pending);
             blockCreateTaskReferences(runId, pending, resolution);
             return resolution;
         }
         CreateTaskReferenceResolver.Resolution resolution = this.createTaskReferenceResolver.resolve(pending.getArguments());
+        if (resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED && batchSize == 1) {
+            resolution = resolveUnresolvedCreateTask(pending, prompt, resolution);
+        }
         if (resolution.status() == CreateTaskReferenceResolver.Status.RESOLVED) {
             pending.setArguments(resolution.canonicalArguments());
         }
@@ -985,6 +1000,70 @@ public class SpToolCallingManager implements ToolCallingManager {
             blockCreateTaskReferences(runId, pending, resolution);
         }
         return resolution;
+    }
+
+    private CreateTaskReferenceResolver.Resolution resolveUnresolvedCreateTask(PendingToolCall pending, Prompt prompt,
+                                                                               CreateTaskReferenceResolver.Resolution original) {
+        if (this.actionIntentParser == null) {
+            return original;
+        }
+        ProviderRuntime runtime = providerRuntimeOf(prompt);
+        ToolDefinition definition = toolDefinitionOf(prompt, TOOL_CREATE_TASK);
+        String userText = lastRealUserText(prompt);
+        if (runtime == null || definition == null || StringUtils.isBlank(userText)) {
+            return failedIntentResolution(pending);
+        }
+        ActionIntentParser.Request request = new ActionIntentParser.Request(userText, definition, pending.getArguments());
+        ActionIntentParser.Result parsed = callIntentParser(prompt, request, runtime);
+        if (parsed.status() != ActionIntentParser.Status.PARSED || parsed.plan() == null
+                || parsed.plan().actions().size() != 1) {
+            return failedIntentResolution(pending);
+        }
+        String arguments = parsed.plan().actions().getFirst().arguments().toString();
+        return this.createTaskReferenceResolver.resolve(arguments);
+    }
+
+    private ActionIntentParser.Result callIntentParser(Prompt prompt, ActionIntentParser.Request request,
+                                                       ProviderRuntime runtime) {
+        Duration configured = this.properties.getTool().getExecTimeout();
+        Duration timeout = configured == null || configured.isZero() || configured.isNegative()
+                ? INTENT_FALLBACK_TIMEOUT : configured;
+        try {
+            return executeBounded(() -> this.actionIntentParser.parse(request, runtime), timeout, TOOL_CREATE_TASK,
+                    "action-intent");
+        }
+        catch (ToolExecutionTimeoutException | ToolExecutorSaturatedException ex) {
+            log.warn("action intent parsing did not complete within its bounded execution", ex);
+            return new ActionIntentParser.Result(ActionIntentParser.Status.FAILED, null,
+                    ActionIntentParser.MODEL_CALL_FAILED);
+        }
+    }
+
+    private static CreateTaskReferenceResolver.Resolution failedIntentResolution(PendingToolCall pending) {
+        return new CreateTaskReferenceResolver.Resolution(CreateTaskReferenceResolver.Status.FAILED,
+                pending.getArguments(), List.of(), CreateTaskReferenceResolver.FAILED_CODE);
+    }
+
+    private static String lastRealUserText(Prompt prompt) {
+        return prompt.getInstructions().stream()
+                .filter(message -> message instanceof UserMessage && !SyntheticMessages.isSynthetic(message))
+                .reduce((first, second) -> second).map(Message::getText).orElse(null);
+    }
+
+    private static ToolDefinition toolDefinitionOf(Prompt prompt, String name) {
+        if (!(prompt.getOptions() instanceof ToolCallingChatOptions options)
+                || CollectionUtils.isEmpty(options.getToolCallbacks())) {
+            return null;
+        }
+        return options.getToolCallbacks().stream().filter(callback -> callback != null
+                        && name.equals(callback.getToolDefinition().name()))
+                .map(ToolCallback::getToolDefinition).findFirst().orElse(null);
+    }
+
+    private ProviderRuntime providerRuntimeOf(Prompt prompt) {
+        Map<String, Object> context = toolContextOf(prompt);
+        Object runtime = context == null ? null : context.get(TOOL_CONTEXT_PROVIDER_RUNTIME);
+        return runtime instanceof ProviderRuntime selected ? selected : null;
     }
 
     private static boolean isCreateTaskReferenceBlocked(PendingToolCall pending) {
@@ -3474,30 +3553,35 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (timeout == null || timeout.isZero() || timeout.isNegative()) {
             return delegateSingle(prompt, pending);
         }
-        Future<String> future;
-        // 身份不随线程池继承：在提交线程抓本轮身份，执行线程重新建立作用域（不把句柄跨线程关闭）
+        return executeBounded(() -> delegateSingle(prompt, pending), timeout, pending.getName(), pending.getToolCallId());
+    }
+
+    private <T> T executeBounded(Callable<T> call, Duration timeout, String tool, String callId) {
+        Future<T> future;
+        // 身份不随线程池继承：提交时抓本轮身份，执行线程重新建立作用域。
         TenantUser identity = RequestContextUtils.currentOrNull();
         try {
-            // MDC 不随线程池继承：锚点（runId/sessionId）随任务进池，工具日志才不会变成孤儿行
+            // MDC 锚点随任务进池，工具和专注解析共用同一条可追踪调用链。
             future = this.toolTimeoutExecutor.submit(AiTrace.wrapCallable(() -> {
                 try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
-                    return delegateSingle(prompt, pending);
+                    return call.call();
                 }
             }));
         } catch (RejectedExecutionException ex) {
-            log.warn("tool timeout executor saturated (capacity {}); call not executed tool={} toolCallId={}", this.toolTimeoutThreads,
-                    pending.getName(), pending.getToolCallId(), ex);
-            throw new ToolExecutorSaturatedException(pending.getName(), this.toolTimeoutThreads);
+            log.warn("bounded executor saturated (capacity {}); call not executed tool={} toolCallId={}",
+                    this.toolTimeoutThreads, tool, callId, ex);
+            throw new ToolExecutorSaturatedException(tool, this.toolTimeoutThreads);
         }
         try {
             return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (TimeoutException ex) {
             future.cancel(true);
-            throw new ToolExecutionTimeoutException(timeout, pending.getName());
+            throw new ToolExecutionTimeoutException(timeout, tool);
         } catch (InterruptedException ex) {
+            future.cancel(true);
             Thread.currentThread().interrupt();
             throw new StreamViolationException(StreamViolationException.CANCELLED,
-                    "Tool execution wait interrupted; finishing the run as cancelled (tool=" + pending.getName() + ")");
+                    "Bounded execution wait interrupted; finishing the run as cancelled (tool=" + tool + ")");
         } catch (ExecutionException ex) {
             Throwable cause = ex.getCause() == null ? ex : ex.getCause();
             if (cause instanceof RuntimeException runtime) {

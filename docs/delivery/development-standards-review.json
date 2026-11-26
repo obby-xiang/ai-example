@@ -8609,6 +8609,92 @@
           "reason": "十二个保留原值方法先证实RESOLVED被旧实现误改为FAILED，精确命中方法先证实多余候选查询；十三个方法逐个GREEN，另五个唯一归一/单范围/仓储异常/枚举/IN方法逐个GREEN。IDEA Reformat与定点编译成功，Maven逐方法编译测试及最终compile成功，Checkstyle为0；PMD沿用已证实离线依赖阻塞未复跑，未运行类/套件、真实模型或服务。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:cf5041339466c0eb12feeed0723c28cb3369fdc740df8d73b71910cd63dc685a",
+      "status": "reviewed",
+      "reason": "对Task 2最终暂存的七个生产文件逐hunk复核：ActionPlan承载通用actions[]，ActionIntentParser只经本轮ProviderRuntime提交禁用自动执行的规划function并严格校验响应；SpToolCallingManager仅对单批单个UNRESOLVED create_task执行一次有界解析并复跑同一resolver；ResilientChatService只在内存toolContext传runtime；AiProviderRegistry在唯一ChatModel构造点接共享10路限流，异常、超时、取消和流终止均释放资源。",
+      "reviewedAt": "2026-11-26T11:01:39+08:00",
+      "reviewer": "Kimi Code Task 2施工后独立静态自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "新增通用ActionPlan(actions[])及专注function calling解析，当前执行入口只接受恰好一个create_task；原resolver先跑，仅UNRESOLVED单动作最多解析一次，解析后复跑同一resolver，多动作、未知工具、空响应、LENGTH、非法JSON和Schema违规均失败关闭。",
+          "reason": "主模型已选create_task但原句引用未决时需要通用语义槽位解析，同时不得把多意图计划静默裁成第一个动作或绕过既有canonical化、preflight和HITL。",
+          "impact": "仅影响主模型已产生单条create_task且精确resolver未决的后端路径；已解析、多工具批次、多配置、明确全量、scopeKeys、用户取消/拒绝和下游向导保持既有语义，不新增前端协议或聊天记忆写入。"
+        },
+        {
+          "change": "在AiProviderRegistry唯一ChatModel构造点加入共享ConcurrencyLimitedChatModel，所有生产直接、摘要、恢复和工具内部模型路径共用10个许可，等待上限30秒；同步调用finally释放，流式调用在终止/错误/取消doFinally释放。",
+          "reason": "新增专注解析属于间接模型路径，开发规范要求所有模型路径共用同一总并发边界且排队有界，不能给parser单独增设10路或绕过主模型边界。",
+          "impact": "生产ProviderRuntime的call/stream共享单实例限流；默认options和ReasoningAwareOpenAiChatModel回放能力经显式解包保留，不新增线程池、Redis键、数据库访问、模型供应商分支或配置键。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiProviderRegistry.java",
+          "status": "checked",
+          "reason": "核对setter装配共享limiter及newModel包装覆盖缓存、逐请求、冻结和恢复派生；forReasoningRecovery改从装饰器读取原回放位，未读取全局默认替代本轮runtime。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/ConcurrencyLimitedChatModel.java",
+          "status": "checked",
+          "reason": "核对call统一进入共享许可、InterruptedException恢复中断、其余异常不伪装成功，stream转发同一限制，getDefaultOptions与reasoning回放能力透传真实delegate。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/ModelConcurrencyLimiter.java",
+          "status": "checked",
+          "reason": "核对公平Semaphore固定10许可和30秒tryAcquire有界等待，同步finally及流doFinally成对释放，delegate构造/null/异常路径不泄漏许可，也未创建线程池。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "逐hunk核对resolver→单次parser→同一resolver顺序、批次与真实用户文本/当前ToolDefinition门槛；executeBounded复用现有toolTimeoutExecutor并传播身份，超时和中断均cancel(true)，中断恢复且用户取消异常类型不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/intent/ActionIntentParser.java",
+          "status": "checked",
+          "reason": "核对输入仅含真实文本、原始参数提示、当前工具定义和目录投影；响应检查空结果、大小写LENGTH、唯一规划function、严格ActionPlan形状、单create_task及本地Schema类型/required/ref/enum，未写CNY特例、记忆或SSE。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/intent/ActionPlan.java",
+          "status": "checked",
+          "reason": "通用record显式声明actions及id/tool/arguments/unresolved/dependsOn的JsonProperty，集合做不可变null归一，arguments保留任意JSON对象供未来动作扩展而本批由宿主限制执行面。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "首轮和续跑私有构造点都把selected/runtime放入toolContext，runtime只在请求内存通道传递；快照与帧回归断言无runtime键，reasoning快照判定通过装饰器解包保留。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用现有Jackson、Spring AI ToolCallback/OpenAiChatOptions、Reactor Flux、Apache StringUtils、manager工具执行器和CreateTaskReferenceResolver；仅使用JDK Semaphore，没有新增或升级依赖。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增及本批触及方法均低于50行和复杂度20，控制块有大括号、顺序集合用getFirst、布尔读取使用get前缀，ActionPlan字段显式JsonProperty；未使用通配或static import、Lombok相等性和可变共享集合。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "模型、目录、Schema和有界执行失败均有英文WARN或真实异常结果，Throwable位于日志最后参数；不记录用户原句、目录正文、上游响应或runtime密钥，多动作和非法响应不会吞成成功。"
+        },
+        "toc-interaction": {
+          "status": "not-affected",
+          "reason": "本批未修改前端、i18n、卡片、向导或用户文案，parser不发SSE；系统失败仍仅走manager既有tool失败帧，不新增确认或前端请求卡。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "模型总并发在AiProviderRegistry单点共享为10且有30秒等待上限，同步/流式异常和取消释放许可；专注解析复用有界执行器并恢复中断，runtime不进入快照、历史或SSE，未访问AI会话数据库或新增Redis状态。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "只在完整ChatResponse和完整工具arguments到达后用Jackson解析，LENGTH及非法JSON明确拒绝；新增流式包装只管理许可，不切分UTF-8、UTF-16、SSE或字素簇。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "解析、接入、失败关闭和并发均先取得真实预期RED或明确记录既有基线PASS，再逐方法GREEN；27个新增测试方法全部单独exit 0，另有三个既有方法通过。七个生产文件IDEA Reformat ok，实际编译368源及最终compile成功，六个文件定向Checkstyle为0；全量Checkstyle仍有33个非本批新增违规，ResilientChatService既有未触及cancelTerminalLocked为63行。两个旧回归方法因既有身份夹具在setUp/断言前失败，未改无关测试；未运行类/套件、真实模型或服务，证据边界见仓外Task 2报告。"
+        }
+      }
     }
   ]
 }
