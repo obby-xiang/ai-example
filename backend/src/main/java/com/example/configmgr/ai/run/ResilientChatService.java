@@ -1754,7 +1754,7 @@ public class ResilientChatService {
     }
 
     /** 首轮 create_task 引用未决补全的 run 级事实；旧 createTaskCorrection* 兼容键不参与判定。 */
-    public static final String CREATE_ENTRY_CORRECTION_MARKER = "createEntryCorrectionUsed";
+    static final String CREATE_ENTRY_CORRECTION_MARKER = "createEntryCorrectionUsed";
 
     private boolean createEntryCorrectionDue(String runId, AiContext fallback, boolean originalFirstTurn) {
         RunSnapshot snapshot = requireCreateEntryCorrectionAllowed(runId);
@@ -2232,6 +2232,7 @@ public class ResilientChatService {
         if (createEntry && prompt.getOptions() instanceof ToolCallingChatOptions options) {
             Map<String, Object> toolContext = new LinkedHashMap<>(options.getToolContext());
             toolContext.put(SpToolCallingManager.TOOL_CONTEXT_SUPPRESS_REASONING, true);
+            toolContext.put(SpToolCallingManager.TOOL_CONTEXT_CREATE_ENTRY_CORRECTION, true);
             options.setToolContext(toolContext);
         }
         log.info("close correction request: history {} entries (incl. tool messages), type={} runId={}",

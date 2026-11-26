@@ -9121,6 +9121,67 @@
           "reason": "缺type真实RED复现5分钟官方续轮，其他工具/resolution FAILED/多工具经反向变异均获独立RED，恢复后逐方法GREEN；旧多动作、guard、完整取消拒绝、原句型、旧缺type/FAILED及两种reasoning对照均1/1通过。生产IDEA Reformat和Maven compile通过；未运行类/套件、真实模型或服务。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:8969e7d8605260faea11db5821a4ef9ef059c23c0cf9c5da325efe6ab800aa47",
+      "status": "reviewed",
+      "reason": "对复审要求的两项生产修复逐hunk复核：manager不再读取永久createEntryCorrectionUsed，只在当前Prompt toolContext识别createEntryCorrection；该标记只由correctionStream设置，严格corrected批的所有非OK终态统一returnDirect并抑制合成JSON。永久used仅保留二次补全抑制，批准后的普通工具按原披露/HITL处理。",
+      "reviewedAt": "2026-11-26T17:08:17+08:00",
+      "reviewer": "Kimi Code第二轮Critical/Important修复后的静态逐hunk自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "corrected工具批判定从永久context.extra.createEntryCorrectionUsed改为单次Prompt内存TOOL_CONTEXT_CREATE_ENTRY_CORRECTION。",
+          "reason": "永久used会污染批准后的navigate_to/select_definitions/confirm_step等正常工具，临时标记只应描述本次corrected模型响应。",
+          "impact": "临时标记不写快照、历史或SSE，后续buildResumedPrompt不携带；永久used只用于禁止第二次补全，正常后续工具不再被误判。"
+        },
+        {
+          "change": "corrected下所有已结算且effectiveOutcome非OK的工具统一returnDirect，不再只匹配引用错误码。",
+          "reason": "RESOLVED后的preflight失败/不可用使用PRECHECK_FAILED等其他码，旧逻辑会进入官方下一跳并重复预检。",
+          "impact": "corrected preflight失败仅两次上游后真实失败，无表单和任务；用户拒绝/取消仍走原CANCELLED语义，普通非corrected preflight失败仍保留官方续轮。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "新增TOOL_CONTEXT_CREATE_ENTRY_CORRECTION常量并从Prompt读取，prepareBatch/preparePending不再读永久extra；settleBatch合并correctedNonOk与引用阻断，非OK统一returnDirect并复用TurnTextCapture抑制。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "仅createEntry correctionStream在复制后的options.toolContext设置临时标记，永久CREATE_ENTRY_CORRECTION_MARKER恢复包内可见并只服务needsCreateEntryCorrection，正常buildResumedPrompt未增加该键。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "复用现有ToolCallingChatOptions.toolContext、Prompt、ToolOutcome和TurnTextCapture，未新增永久键、依赖或替代框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增常量和短小实例判定保持方法规模/复杂度上限，Boolean.TRUE显式比较，控制块有大括号；未新增集合、JSON实体、通配/static import或共享可变状态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "沿用现有失败码和安全日志，未新增用户原文、临时标记、上游body或敏感输出；preflight失败保持真实FAILED而非成功。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "corrected失败不出现补偿卡或任务，内部结果JSON不上屏；批准后navigate_to按普通前端卡挂起，临时标记不进入SSE。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "临时标记仅存在当前Prompt内存，corrected非OK终止且普通批/用户决策语义不变；未新增模型并发、Redis键、数据库访问或永久会话状态。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "仅处理Prompt options和完整工具终态，未改字节流、SSE分片、UTF-8、代理对或截断；合成returnDirect正文继续在既有边界抑制。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "corrected preflight失败与批准后navigate_to均先取得真实RED再GREEN；原句型、永久used二次抑制、严格corrected旧边界、取消/拒绝、异常无临时键和普通preflight续轮均逐方法通过。生产IDEA Reformat和Maven compile成功，未运行类/套件、真实模型或服务。"
+        }
+      }
     }
   ]
 }

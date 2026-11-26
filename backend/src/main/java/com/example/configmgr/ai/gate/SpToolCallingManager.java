@@ -33,7 +33,6 @@ import com.example.configmgr.ai.observe.SettlementObservationStore;
 import com.example.configmgr.ai.run.CancellationRegistry;
 import com.example.configmgr.ai.run.CorrectionPrefixes;
 import com.example.configmgr.ai.run.PendingToolCall;
-import com.example.configmgr.ai.run.ResilientChatService;
 import com.example.configmgr.ai.run.RunParkedException;
 import com.example.configmgr.ai.run.RunRegistry;
 import com.example.configmgr.ai.run.RunSnapshot;
@@ -727,6 +726,9 @@ public class SpToolCallingManager implements ToolCallingManager {
      */
     public static final String TOOL_CONTEXT_SUPPRESS_REASONING = "suppressReasoningContent";
 
+    /** 只存在于单次 create_entry correction Prompt 的进程内工具上下文。 */
+    public static final String TOOL_CONTEXT_CREATE_ENTRY_CORRECTION = "createEntryCorrection";
+
     /**
      * 本轮正文、推理与人工等待 park 的<b>分段捕获器</b>（进程内、随 run 的请求对象走，不落全局表）。
      *
@@ -1001,7 +1003,7 @@ public class SpToolCallingManager implements ToolCallingManager {
 
     private void prepareBatch(ToolBatchState state, List<PendingToolCall> pendings,
                               Map<String, CreateTaskReferenceResolver.Resolution> createTaskResolutions) {
-        if (isCreateEntryCorrection(state.context)) {
+        if (isCreateEntryCorrection(state.prompt)) {
             prepareCorrectedCreateTaskBatch(state, pendings, createTaskResolutions);
             return;
         }
@@ -1051,15 +1053,15 @@ public class SpToolCallingManager implements ToolCallingManager {
                 pending.getArguments(), List.of(), CreateTaskReferenceResolver.FAILED_CODE);
     }
 
-    private static boolean isCreateEntryCorrection(AiContext context) {
-        Map<String, Object> extra = context == null ? null : context.getExtra();
-        return extra != null && Boolean.TRUE.equals(extra.get(ResilientChatService.CREATE_ENTRY_CORRECTION_MARKER));
+    private boolean isCreateEntryCorrection(Prompt prompt) {
+        Map<String, Object> toolContext = toolContextOf(prompt);
+        return toolContext != null && Boolean.TRUE.equals(toolContext.get(TOOL_CONTEXT_CREATE_ENTRY_CORRECTION));
     }
 
     private void preparePending(ToolBatchState state, PendingToolCall pending, int batchSize,
                                 CreateTaskReferenceResolver.Resolution createTaskResolution) {
         blockCreateTaskReferencesIfDue(state, pending, createTaskResolution);
-        if (!isCreateEntryCorrection(state.context)) {
+        if (!isCreateEntryCorrection(state.prompt)) {
             parkTaskTypeIfDue(state, pending, batchSize);
         }
         if (isConditionRejected(state, pending, batchSize) || isPreflightBlocked(state, pending)
@@ -1562,7 +1564,10 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
         List<Message> nextModelHistory = CorrectionPrefixes.historyWithSingleCorrectionPrefix(budget.modelHistory(),
                 CorrectionPrefixes.correctionPrefix(state.snapshot));
-        boolean blockedCreateTask = pendings.stream().anyMatch(SpToolCallingManager::isCreateTaskReferenceBlocked);
+        boolean correctedNonOk = isCreateEntryCorrection(state.prompt) && pendings.stream()
+                .anyMatch(pending -> pending.resolved() && pending.effectiveOutcome() != ToolOutcome.OK);
+        boolean blockedCreateTask = correctedNonOk
+                || pendings.stream().anyMatch(SpToolCallingManager::isCreateTaskReferenceBlocked);
         TurnTextCapture turnText = turnTextOf(state.prompt);
         if (blockedCreateTask && turnText != null) {
             turnText.suppressReturnDirectText();

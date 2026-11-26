@@ -146,6 +146,8 @@ class CreateEntryCorrectionHitlTest {
 
     private SpToolCallingManager manager;
 
+    private ToolPreflightService preflight;
+
     private ConfirmGate gate;
 
     private ResumeService resumeService;
@@ -174,8 +176,8 @@ class CreateEntryCorrectionHitlTest {
         when(resumes.getIfAvailable()).thenAnswer(invocation -> this.resumeService);
         this.gate = new ConfirmGate(this.store, this.registry, this.properties, this.cancellations,
                 this.beacon, List.of(), resumes, Runnable::run);
-        ToolPreflightService preflight = new ToolPreflightService(this.jobService, mock(TaskFileRepository.class),
-                mock(ConfigStagingRowRepository.class), this.definitionService);
+        this.preflight = org.mockito.Mockito.spy(new ToolPreflightService(this.jobService, mock(TaskFileRepository.class),
+                mock(ConfigStagingRowRepository.class), this.definitionService));
         this.manager = new SpToolCallingManager(this.store, this.registry, this.gate, toolRegistry,
                 this.codec, this.beacon, this.cancellations, new ToolResultLimiter(this.properties), List.of(),
                 preflight, null, null, null, this.properties);
@@ -265,7 +267,7 @@ class CreateEntryCorrectionHitlTest {
     }
 
     @Test
-    void unresolvedOriginalSentenceTriggersOneCorrectionAndCanonicalizesBeforeHitl() {
+    void unresolvedOriginalSentenceTriggersOneCorrectionAndCanonicalizesBeforeHitl() throws Exception {
         useRealChatClient();
         String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"cny货币字典\"],\"conditions\":{}}";
         String corrected = "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[\"货币字典\"],"
@@ -320,6 +322,7 @@ class CreateEntryCorrectionHitlTest {
         org.mockito.Mockito.verify(this.taskService).createIdempotent(Task.TaskType.EXPORT, "raw title", RUN_ID);
         org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(3))
                 .chatCompletionStream(any(ChatCompletionRequest.class), any());
+        assertTemporaryMarkerAbsent(this.store.get(RUN_ID));
     }
 
     @Test
@@ -425,7 +428,7 @@ class CreateEntryCorrectionHitlTest {
     }
 
     @Test
-    void correctedResolutionFailureReturnsDirectWithoutNextHopOrVisibleToolJson() {
+    void correctedResolutionFailureReturnsDirectWithoutNextHopOrVisibleToolJson() throws Exception {
         this.properties.getResilience().setTotalBudget(java.time.Duration.ofSeconds(2));
         useRealChatClient();
         unresolvedThenCorrected(AiToolNames.CREATE_TASK,
@@ -439,6 +442,67 @@ class CreateEntryCorrectionHitlTest {
         assertThat(corrected.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
         assertThat(corrected.getCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
         assertThat(this.store.get(RUN_ID).getAssistantContent()).isBlank();
+        assertTemporaryMarkerAbsent(this.store.get(RUN_ID));
+    }
+
+    @Test
+    void correctedResolvedPreflightFailureReturnsDirectWithoutNextHop() throws Exception {
+        this.properties.getResilience().setTotalBudget(java.time.Duration.ofSeconds(2));
+        useRealChatClient();
+        ToolPreflightService.PreflightReport failure = new ToolPreflightService.PreflightReport(false,
+                Map.of("type", "EXPORT"), List.of(new ToolPreflightService.PreflightReport.Check(
+                        "forced preflight failure", false, "corrected preflight must stop")),
+                "forced", "", null, "forced-report");
+        org.mockito.Mockito.doReturn(failure).when(this.preflight)
+                .inspect(org.mockito.ArgumentMatchers.eq(AiToolNames.CREATE_TASK),
+                        org.mockito.ArgumentMatchers.eq(ARGUMENTS), any(AiContext.class));
+        unresolvedThenCorrected(AiToolNames.CREATE_TASK, ARGUMENTS);
+        FrameWire wire;
+        try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+                com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
+            wire = FrameWire.attachTo(this.registry.of(RUN_ID));
+        }
+
+        chat();
+
+        assertFailedWithoutFollowUp();
+        assertOriginalUnresolved();
+        PendingToolCall corrected = this.store.pending(RUN_ID, CORRECTED_CALL_ID);
+        assertThat(corrected.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+        assertThat(corrected.getCode()).isEqualTo(com.example.configmgr.ai.tool.ToolOutcome.CODE_PRECHECK_FAILED);
+        assertTemporaryMarkerAbsent(this.store.get(RUN_ID), wire);
+    }
+
+    @Test
+    void approvedCorrectionDoesNotMarkLaterNavigateToAsCorrectedBatch() throws Exception {
+        useRealChatClient();
+        String navigationCall = "call-navigate-after-correction";
+        when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
+                .thenReturn(Flux.just(toolCallChunk(CALL_ID, AiToolNames.CREATE_TASK, UNRESOLVED_ARGUMENTS)),
+                        Flux.just(toolCallChunk(CORRECTED_CALL_ID, AiToolNames.CREATE_TASK, ARGUMENTS)),
+                        Flux.just(toolCallChunk(navigationCall, AiToolNames.NAVIGATE_TO,
+                                "{\"page\":\"export\",\"taskId\":42}")));
+        FrameWire wire;
+        try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+                com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
+            wire = FrameWire.attachTo(this.registry.of(RUN_ID));
+        }
+        chat();
+        stubCreatedTask();
+
+        ConfirmGate.Submission submission = submitDecision(RUN_ID, CORRECTED_CALL_ID, true);
+
+        assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+        RunSnapshot snapshot = this.store.get(RUN_ID);
+        assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+        PendingToolCall navigation = this.store.pending(RUN_ID, navigationCall);
+        assertThat(navigation.getName()).isEqualTo(AiToolNames.NAVIGATE_TO);
+        assertThat(navigation.getStatus()).isEqualTo(PendingToolCall.PENDING);
+        assertThat(navigation.getKind()).isEqualTo(PendingToolCall.KIND_FRONTEND);
+        org.mockito.Mockito.verify(this.taskService).createIdempotent(Task.TaskType.EXPORT, "raw title", RUN_ID);
+        org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(3))
+                .chatCompletionStream(any(ChatCompletionRequest.class), any());
+        assertTemporaryMarkerAbsent(snapshot, wire);
     }
 
     @Test
@@ -485,7 +549,7 @@ class CreateEntryCorrectionHitlTest {
     }
 
     @Test
-    void rejectedCreateTaskDoesNotCorrectAgainOrExecute() {
+    void rejectedCreateTaskDoesNotCorrectAgainOrExecute() throws Exception {
         useRealChatClient();
         unresolvedThenCorrected(AiToolNames.CREATE_TASK, ARGUMENTS);
         chat();
@@ -504,10 +568,11 @@ class CreateEntryCorrectionHitlTest {
         verifyNoInteractions(this.jobService);
         assertThat(this.store.ledger(RUN_ID)).noneMatch(record -> AiToolNames.CREATE_TASK.equals(record.get("name"))
                 && Boolean.TRUE.equals(record.get("executed")));
+        assertTemporaryMarkerAbsent(this.store.get(RUN_ID));
     }
 
     @Test
-    void cancelledCreateTaskDoesNotCorrectAgainOrExecute() {
+    void cancelledCreateTaskDoesNotCorrectAgainOrExecute() throws Exception {
         useRealChatClient();
         unresolvedThenCorrected(AiToolNames.CREATE_TASK, ARGUMENTS);
         chat();
@@ -526,13 +591,20 @@ class CreateEntryCorrectionHitlTest {
         verifyNoInteractions(this.jobService);
         org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
                 .chatCompletionStream(any(ChatCompletionRequest.class), any());
+        assertTemporaryMarkerAbsent(this.store.get(RUN_ID));
     }
 
     @Test
     void preflightFailureDoesNotCorrectAgainOrEnterConfirmGate() {
         useRealChatClient();
-        String invalid = "{\"type\":\"EXPORT\",\"conditions\":{\"fields\":["
-                + "{\"fieldCode\":\"code\",\"operator\":\"EQ\",\"value\":\"CNY\"}]}}";
+        String invalid = ARGUMENTS;
+        ToolPreflightService.PreflightReport failure = new ToolPreflightService.PreflightReport(false,
+                Map.of("type", "EXPORT"), List.of(new ToolPreflightService.PreflightReport.Check(
+                        "forced preflight failure", false, "ordinary preflight failure may continue")),
+                "forced", "", null, "forced-report");
+        org.mockito.Mockito.doReturn(failure).when(this.preflight)
+                .inspect(org.mockito.ArgumentMatchers.eq(AiToolNames.CREATE_TASK),
+                        org.mockito.ArgumentMatchers.eq(invalid), any(AiContext.class));
         when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
                 .thenReturn(Flux.just(toolCallChunk(CALL_ID, AiToolNames.CREATE_TASK, invalid)),
                         Flux.just(textChunk("预检未通过")));
@@ -821,6 +893,16 @@ class CreateEntryCorrectionHitlTest {
         assertThat(original.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
         assertThat(original.getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
         assertThat(original.isExecuted()).isFalse();
+    }
+
+    private void assertTemporaryMarkerAbsent(RunSnapshot snapshot) throws Exception {
+        assertThat(AiContext.fromMap(snapshot.getContext()).getExtra()).doesNotContainKey("createEntryCorrection");
+        assertThat(snapshot.getMessageJson()).doesNotContain("\"createEntryCorrection\":true");
+    }
+
+    private void assertTemporaryMarkerAbsent(RunSnapshot snapshot, FrameWire wire) throws Exception {
+        assertTemporaryMarkerAbsent(snapshot);
+        assertThat(this.mapper.writeValueAsString(wire.frames())).doesNotContain("\"createEntryCorrection\":true");
     }
 
     private void assertFailedWithoutFollowUp() {
