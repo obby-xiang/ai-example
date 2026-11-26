@@ -3,7 +3,6 @@ package com.example.configmgr.ai.run;
 import com.example.configmgr.ai.config.AiConfigService;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.AiProviderRegistry;
-import com.example.configmgr.ai.config.ConcurrencyLimitedChatModel;
 import com.example.configmgr.ai.config.EmptyLengthReasoningRecovery;
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.context.ContextBreakdownService;
@@ -676,7 +675,8 @@ public class ResilientChatService {
                 setup.runtime().providerId(), setup.runtime().modelId(), frozenParams(setup.runtime(), setup.isParamsLocked()),
                 setup.runtime().options().getExtraBody(), setup.request().clientRequestId(), setup.transcriptText(),
                 setup.turnStartedAtMs(), setup.runtime().options().getReasoningEffort(), recovery,
-                Boolean.TRUE.equals(ConcurrencyLimitedChatModel.getReasoningReplayEnabled(setup.runtime().chatModel())));
+                setup.runtime().chatModel() instanceof org.springframework.ai.openai.ReasoningAwareOpenAiChatModel reasoningModel
+                        && reasoningModel.isReasoningReplayEnabled());
         recordTranscriptUser(runId, setup.sessionId(), setup.transcriptText(), setup.turnStartedAtMs());
         return new FirstTurnExecution(false, compaction, snapshot, full, recovery);
     }

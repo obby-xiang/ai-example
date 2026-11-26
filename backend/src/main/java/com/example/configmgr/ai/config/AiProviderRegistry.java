@@ -18,7 +18,6 @@ import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.ai.openai.api.ResponseBoundOpenAiApi;
 import org.springframework.ai.retry.RetryUtils;
 import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.client.reactive.JdkClientHttpConnector;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.stereotype.Component;
@@ -89,13 +88,6 @@ public class AiProviderRegistry {
     private final ObjectProvider<ObservationRegistry> observationRegistry;
 
     private final OpenAiChatProperties chatProperties;
-
-    private ModelConcurrencyLimiter modelConcurrencyLimiter;
-
-    @Autowired(required = false)
-    public void setModelConcurrencyLimiter(ModelConcurrencyLimiter limiter) {
-        this.modelConcurrencyLimiter = limiter;
-    }
 
     /** RuntimeKey → 实例（批① 只保留"当前默认目标"这一个 key，旧 key 在重建时淘汰）。 */
     private final Map<String, ProviderRuntime> runtimes = new ConcurrentHashMap<>();
@@ -406,7 +398,8 @@ public class AiProviderRegistry {
             options.setExtraBody(extraBody);
         }
         mergeRequestExtraBody(options, recovery.requestExtraBody());
-        Boolean reasoningReplay = ConcurrencyLimitedChatModel.getReasoningReplayEnabled(initial.chatModel());
+        Boolean reasoningReplay = initial.chatModel() instanceof ReasoningAwareOpenAiChatModel reasoningModel
+                ? reasoningModel.isReasoningReplayEnabled() : null;
         ChatModel model = newModel(initial.api(), options, initial.providerId(), reasoningReplay);
         ChatClient client = ChatClient.builder(model).build();
         return new ProviderRuntime(initial.providerId(), initial.providerCode(), initial.modelId(), initial.baseUrl(),
@@ -537,15 +530,13 @@ public class AiProviderRegistry {
     private ChatModel newModel(OpenAiApi api, OpenAiChatOptions options, Long providerId, Boolean reasoningReplay) {
         boolean replayEnabled = reasoningReplay == null
                 ? this.configService.supportsReasoning(providerId, options.getModel()) : reasoningReplay;
-        ChatModel model = new ReasoningAwareOpenAiChatModel(api, options, this.toolCallingManager,
+        return new ReasoningAwareOpenAiChatModel(api, options, this.toolCallingManager,
                 // 超时面治理批① 第 2 项：默认策略显式化为「仅瞬时故障 + 0.5s×2 上限 5s + 抖动」
                 //（见 AiRetryDefaults；自有的 retryTemplate bean 由 AiRetryConfig 提供，
                 // 这里的回落只为"非 Spring 装配/单测"与 bean 缺失两种场景兜底）
                 this.retryTemplate.getIfAvailable(AiRetryDefaults::retryTemplate),
                 this.observationRegistry.getIfAvailable(() -> ObservationRegistry.NOOP),
                 providerId, replayEnabled);
-        return this.modelConcurrencyLimiter == null ? model
-                : new ConcurrencyLimitedChatModel(model, this.modelConcurrencyLimiter);
     }
 
 

@@ -8695,6 +8695,92 @@
           "reason": "解析、接入、失败关闭和并发均先取得真实预期RED或明确记录既有基线PASS，再逐方法GREEN；27个新增测试方法全部单独exit 0，另有三个既有方法通过。七个生产文件IDEA Reformat ok，实际编译368源及最终compile成功，六个文件定向Checkstyle为0；全量Checkstyle仍有33个非本批新增违规，ResilientChatService既有未触及cancelTerminalLocked为63行。两个旧回归方法因既有身份夹具在setUp/断言前失败，未改无关测试；未运行类/套件、真实模型或服务，证据边界见仓外Task 2报告。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:e9768273b6bbc0332fcb40f1ec2196c2afd2585831fe4de6de28a8d3971f456b",
+      "status": "reviewed",
+      "reason": "对Task 2审查修复的最终暂存hunk逐项复核：撤销上一提交新增的进程内模型限流装饰并恢复AiProviderRegistry与reasoning原语义；专注解析后仍UNRESOLVED转换为FAILED以绕过表单；真实CancellationRegistry在调用前、在飞和结果接受前连接Future并注销listener；规划响应启用尾随token拒绝和多choices拒绝；Schema明确为受限子集且未知约束失败关闭。",
+      "reviewedAt": "2026-11-26T11:55:04+08:00",
+      "reviewer": "Kimi Code Task 2审查修复静态逐hunk自审（用户禁止子代理，未派遣reviewer）",
+      "specChanges": [
+        {
+          "change": "删除ConcurrencyLimitedChatModel、ModelConcurrencyLimiter及其测试，恢复AiProviderRegistry直接创建ReasoningAwareOpenAiChatModel；不再声称本任务解决多实例全局模型并发。",
+          "reason": "进程内Semaphore既不能提供多实例全局10路也不是有界队列；解析与原主模型调用在同一run内串行，本任务不新增并行上游，也不引入Redis全局限流。",
+          "impact": "AiProviderRegistry回到Task 2前行为，既有全局限流缺口不在本批修复；单次parser、runtime内存传递、reasoning冻结和恢复语义保留。"
+        },
+        {
+          "change": "专注解析后的二次UNRESOLVED明确折算为内部FAILED，不再进入CreateTaskDetailsForm或创建HITL；真实取消在提交前、listener注册后和模型结果接受前检查，onCancel直接cancel(true)，finally注销listener。",
+          "reason": "首次未决表单与解析后未决必须具有不同状态；真实取消必须覆盖Future而不只覆盖caller interrupt，且所有取消路径零创建确认。",
+          "impact": "仅改变已经过专注解析仍未决及专注解析取消的结局；未解析的首次未决表单、已RESOLVED、普通工具超时、用户取消/拒绝终止和下游向导保持原路径。"
+        },
+        {
+          "change": "规划工具arguments使用独立ObjectReader启用FAIL_ON_TRAILING_TOKENS，ChatResponse超过一个choice即失败；Schema校验显式限定type/properties/required/items/enum/local ref等子集，未支持或未知约束不再静默通过。",
+          "reason": "合法计划尾随第二对象或从多choices取第一条会把非唯一响应误当成功；受限实现不得声称完整JSON Schema校验。",
+          "impact": "只收紧专注规划响应和当前create_task参数的宿主准入；不改变主聊天Jackson配置，业务定义、字段、枚举和真实主键canonical化仍由现有resolver负责。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/AiProviderRegistry.java",
+          "status": "checked",
+          "reason": "删除limiter字段/setter和ChatModel包装，恢复instanceof ReasoningAwareOpenAiChatModel及原newModel直接返回，相对Task 2基线无遗留diff。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/ConcurrencyLimitedChatModel.java",
+          "status": "checked",
+          "reason": "按审查裁决删除本批新增装饰器，消除进程内Semaphore被误当多实例全局治理的错误边界。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/config/ModelConcurrencyLimiter.java",
+          "status": "checked",
+          "reason": "按审查裁决删除固定许可实现，未替换为Redis、新框架或另一套本任务外的并发治理。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "第二次resolver仍UNRESOLVED时返回FAILED；executeBounded新增仅专注解析使用的runId取消通道，调用前后复用checkCancelled，onCancel绑定Future，异常取消Future并关闭listener，caller中断仍恢复。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/intent/ActionIntentParser.java",
+          "status": "checked",
+          "reason": "响应多于一个choice直接INVALID，严格reader拒绝尾随token；SUPPORTED_SCHEMA_FIELDS和递归检查明确支持范围，pattern等未支持约束及未知字段失败关闭，业务值不在parser归一。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "撤销装饰器解包分支并恢复原ReasoningAwareOpenAiChatModel类型判断，首轮/续跑toolContext传本轮runtime的既有Task 2实现不变。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "checked",
+          "reason": "删除本批新增并发组件并继续复用既有CancellationRegistry、Jackson ObjectReader和工具执行器；没有新增依赖、Redis全局限流或新框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增/修改方法保持50行和复杂度20以内，控制块有大括号，使用现有getFirst和不可变集合；未新增JSON实体、通配import或Lombok相等性，受限Schema字段集合语义明确。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "取消、非法JSON和Schema失败均返回真实失败或既有CANCELLED，listener关闭异常以英文WARN和Throwable记录；不输出原句、上游响应或runtime敏感字段。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "解析后仍未知不再创建补充信息卡或确认卡，真实取消/超时不进HITL；首次未决既有表单和正常失败结局帧不变，未修改前端文案或向导。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "真实onCancel直接取消专注Future并在finally注销，调用前、注册后和结果接受前检查既有三态；不新增Redis键或全局并发声明，同一run解析与主模型串行，AI会话数据库边界不变。"
+        },
+        "unicode-stream-parsing": {
+          "status": "checked",
+          "reason": "完整规划响应启用FAIL_ON_TRAILING_TOKENS且多choices拒绝，不改全局Jackson；仍只处理完整JSON，不涉及字节分片、代理对、SSE截断或二次转码。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "七个修复测试均先取得真实RED再逐方法GREEN，另有六个成功/超时/caller interrupt/首次表单/Schema ref回归方法逐方法通过；生产IDEA Reformat ok，最终实际编译366源及定向Checkstyle 0。clean compile因既有进程锁定config-mgr.jar失败后，普通compile已重新编译全部366源并成功；未运行类/套件、真实模型或服务，修复证据追加到仓外Task 2报告。"
+        }
+      }
     }
   ]
 }

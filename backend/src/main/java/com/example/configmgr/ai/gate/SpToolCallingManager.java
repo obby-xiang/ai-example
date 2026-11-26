@@ -97,6 +97,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -991,7 +992,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
         CreateTaskReferenceResolver.Resolution resolution = this.createTaskReferenceResolver.resolve(pending.getArguments());
         if (resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED && batchSize == 1) {
-            resolution = resolveUnresolvedCreateTask(pending, prompt, resolution);
+            resolution = resolveUnresolvedCreateTask(runId, pending, prompt, resolution);
         }
         if (resolution.status() == CreateTaskReferenceResolver.Status.RESOLVED) {
             pending.setArguments(resolution.canonicalArguments());
@@ -1002,7 +1003,8 @@ public class SpToolCallingManager implements ToolCallingManager {
         return resolution;
     }
 
-    private CreateTaskReferenceResolver.Resolution resolveUnresolvedCreateTask(PendingToolCall pending, Prompt prompt,
+    private CreateTaskReferenceResolver.Resolution resolveUnresolvedCreateTask(String runId, PendingToolCall pending,
+                                                                               Prompt prompt,
                                                                                CreateTaskReferenceResolver.Resolution original) {
         if (this.actionIntentParser == null) {
             return original;
@@ -1014,23 +1016,25 @@ public class SpToolCallingManager implements ToolCallingManager {
             return failedIntentResolution(pending);
         }
         ActionIntentParser.Request request = new ActionIntentParser.Request(userText, definition, pending.getArguments());
-        ActionIntentParser.Result parsed = callIntentParser(prompt, request, runtime);
+        ActionIntentParser.Result parsed = callIntentParser(request, runtime, runId);
         if (parsed.status() != ActionIntentParser.Status.PARSED || parsed.plan() == null
                 || parsed.plan().actions().size() != 1) {
             return failedIntentResolution(pending);
         }
         String arguments = parsed.plan().actions().getFirst().arguments().toString();
-        return this.createTaskReferenceResolver.resolve(arguments);
+        CreateTaskReferenceResolver.Resolution resolved = this.createTaskReferenceResolver.resolve(arguments);
+        return resolved.status() == CreateTaskReferenceResolver.Status.UNRESOLVED
+                ? failedIntentResolution(pending) : resolved;
     }
 
-    private ActionIntentParser.Result callIntentParser(Prompt prompt, ActionIntentParser.Request request,
-                                                       ProviderRuntime runtime) {
+    private ActionIntentParser.Result callIntentParser(ActionIntentParser.Request request, ProviderRuntime runtime,
+                                                       String runId) {
         Duration configured = this.properties.getTool().getExecTimeout();
         Duration timeout = configured == null || configured.isZero() || configured.isNegative()
                 ? INTENT_FALLBACK_TIMEOUT : configured;
         try {
             return executeBounded(() -> this.actionIntentParser.parse(request, runtime), timeout, TOOL_CREATE_TASK,
-                    "action-intent");
+                    "action-intent", runId);
         }
         catch (ToolExecutionTimeoutException | ToolExecutorSaturatedException ex) {
             log.warn("action intent parsing did not complete within its bounded execution", ex);
@@ -3557,37 +3561,93 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private <T> T executeBounded(Callable<T> call, Duration timeout, String tool, String callId) {
-        Future<T> future;
+        return executeBounded(call, timeout, tool, callId, null);
+    }
+
+    private <T> T executeBounded(Callable<T> call, Duration timeout, String tool, String callId,
+                                 String cancellationRunId) {
+        checkBoundedCancellation(cancellationRunId);
+        Future<T> future = submitBounded(call, tool, callId);
+        AutoCloseable listener = null;
+        try {
+            if (cancellationRunId != null) {
+                listener = this.cancellations.onCancel(cancellationRunId, () -> future.cancel(true));
+                checkBoundedCancellation(cancellationRunId);
+            }
+            T result = awaitBounded(future, timeout, tool, cancellationRunId);
+            checkBoundedCancellation(cancellationRunId);
+            return result;
+        }
+        catch (RuntimeException | Error ex) {
+            future.cancel(true);
+            throw ex;
+        }
+        finally {
+            closeCancellationListener(listener, cancellationRunId);
+        }
+    }
+
+    private <T> Future<T> submitBounded(Callable<T> call, String tool, String callId) {
         // 身份不随线程池继承：提交时抓本轮身份，执行线程重新建立作用域。
         TenantUser identity = RequestContextUtils.currentOrNull();
         try {
             // MDC 锚点随任务进池，工具和专注解析共用同一条可追踪调用链。
-            future = this.toolTimeoutExecutor.submit(AiTrace.wrapCallable(() -> {
+            return this.toolTimeoutExecutor.submit(AiTrace.wrapCallable(() -> {
                 try (RunIdentityScope.Scope ignored = RunIdentityScope.open(identity)) {
                     return call.call();
                 }
             }));
-        } catch (RejectedExecutionException ex) {
+        }
+        catch (RejectedExecutionException ex) {
             log.warn("bounded executor saturated (capacity {}); call not executed tool={} toolCallId={}",
                     this.toolTimeoutThreads, tool, callId, ex);
             throw new ToolExecutorSaturatedException(tool, this.toolTimeoutThreads);
         }
+    }
+
+    private <T> T awaitBounded(Future<T> future, Duration timeout, String tool, String cancellationRunId) {
         try {
             return future.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-        } catch (TimeoutException ex) {
+        }
+        catch (TimeoutException ex) {
             future.cancel(true);
             throw new ToolExecutionTimeoutException(timeout, tool);
-        } catch (InterruptedException ex) {
+        }
+        catch (CancellationException ex) {
+            checkBoundedCancellation(cancellationRunId);
+            throw new StreamViolationException(StreamViolationException.CANCELLED,
+                    "Bounded execution was cancelled (tool=" + tool + ")");
+        }
+        catch (InterruptedException ex) {
             future.cancel(true);
             Thread.currentThread().interrupt();
             throw new StreamViolationException(StreamViolationException.CANCELLED,
                     "Bounded execution wait interrupted; finishing the run as cancelled (tool=" + tool + ")");
-        } catch (ExecutionException ex) {
+        }
+        catch (ExecutionException ex) {
             Throwable cause = ex.getCause() == null ? ex : ex.getCause();
             if (cause instanceof RuntimeException runtime) {
                 throw runtime;
             }
             throw new IllegalStateException(cause);
+        }
+    }
+
+    private void checkBoundedCancellation(String runId) {
+        if (runId != null) {
+            checkCancelled(runId);
+        }
+    }
+
+    private void closeCancellationListener(AutoCloseable listener, String runId) {
+        if (listener == null) {
+            return;
+        }
+        try {
+            listener.close();
+        }
+        catch (Exception ex) {
+            log.warn("could not close bounded cancellation listener runId={}", runId, ex);
         }
     }
 

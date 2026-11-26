@@ -3,6 +3,8 @@ package com.example.configmgr.ai.intent;
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.slot.DefinitionCatalog;
 import com.example.configmgr.ai.tool.AiToolNames;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -50,6 +52,14 @@ public class ActionIntentParser {
 
     private static final Set<String> ACTION_FIELDS = Set.of("id", "tool", "arguments", "unresolved", "dependsOn");
 
+    /**
+     * Deliberately limited JSON Schema support, not a full JSON Schema validator. Unknown validation
+     * keywords fail closed; business references and values are still resolved by CreateTaskReferenceResolver.
+     */
+    private static final Set<String> SUPPORTED_SCHEMA_FIELDS = Set.of("$ref", "$defs", "$id", "$schema",
+            "definitions", "type", "properties", "required", "additionalProperties", "items", "enum",
+            "description", "title", "default", "examples", "deprecated", "readOnly", "writeOnly");
+
     private static final String PLANNING_SCHEMA = """
             {"type":"object","properties":{"actions":{"type":"array","minItems":1,"items":{
             "type":"object","properties":{"id":{"type":"string"},"tool":{"type":"string"},
@@ -93,6 +103,9 @@ public class ActionIntentParser {
     }
 
     private Result parseResponse(ChatResponse response, ToolDefinition selectedTool) {
+        if (response != null && response.getResults() != null && response.getResults().size() > 1) {
+            return failure(INVALID_MODEL_RESPONSE);
+        }
         if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
             return failure(EMPTY_MODEL_RESPONSE);
         }
@@ -113,7 +126,7 @@ public class ActionIntentParser {
 
     private Result parsePlan(String json, ToolDefinition selectedTool) {
         try {
-            JsonNode root = this.mapper.readTree(json);
+            JsonNode root = readStrictJson(json);
             requireShape(root);
             ActionPlan plan = this.mapper.treeToValue(root, ActionPlan.class);
             if (plan.actions().size() != 1) {
@@ -124,7 +137,7 @@ public class ActionIntentParser {
                 return new Result(Status.UNSUPPORTED, null, UNKNOWN_ACTION_TOOL);
             }
             validateActionIds(plan.actions());
-            if (!matchesSchema(this.mapper.readTree(selectedTool.inputSchema()), action.arguments())) {
+            if (!matchesSchema(readStrictJson(selectedTool.inputSchema()), action.arguments())) {
                 return failure(INVALID_ACTION_ARGUMENTS);
             }
             return new Result(Status.PARSED, plan, null);
@@ -142,7 +155,7 @@ public class ActionIntentParser {
         ObjectNode tool = input.putObject("tool");
         tool.put("name", request.toolDefinition().name());
         tool.put("description", request.toolDefinition().description());
-        tool.set("inputSchema", this.mapper.readTree(request.toolDefinition().inputSchema()));
+        tool.set("inputSchema", readStrictJson(request.toolDefinition().inputSchema()));
         List<?> definitions = this.catalog.list();
         if (definitions == null) {
             throw new IllegalStateException("definition catalog returned null");
@@ -271,14 +284,43 @@ public class ActionIntentParser {
         }
     }
 
+    private JsonNode readStrictJson(String json) throws JsonProcessingException {
+        return this.mapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(json);
+    }
+
     private static boolean matchesSchema(JsonNode schema, JsonNode arguments) {
         try {
-            return schema.isObject() && matchesNode(schema, schema, arguments);
+            return schema.isObject() && hasSupportedSchemaFields(schema) && matchesNode(schema, schema, arguments);
         }
         catch (RuntimeException ex) {
             log.warn("action intent schema validation failed", ex);
             return false;
         }
+    }
+
+    private static boolean hasSupportedSchemaFields(JsonNode schema) {
+        return hasOnlyFields(schema, SUPPORTED_SCHEMA_FIELDS)
+                && hasSupportedSchemaChildren(schema.path("properties"))
+                && hasSupportedSchemaChildren(schema.path("$defs"))
+                && hasSupportedSchemaChildren(schema.path("definitions"))
+                && isSupportedSchemaChild(schema.path("items"))
+                && isSupportedSchemaChild(schema.path("additionalProperties"));
+    }
+
+    private static boolean hasSupportedSchemaChildren(JsonNode container) {
+        if (!container.isObject()) {
+            return true;
+        }
+        for (JsonNode child : container) {
+            if (!hasSupportedSchemaFields(child)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean isSupportedSchemaChild(JsonNode schema) {
+        return schema.isMissingNode() || !schema.isObject() || hasSupportedSchemaFields(schema);
     }
 
     private static boolean matchesNode(JsonNode root, JsonNode schema, JsonNode value) {

@@ -169,6 +169,42 @@ class ActionIntentParserTest {
     }
 
     @Test
+    void rejectsTrailingContentAfterValidPlan() {
+        ActionIntentParser.Result result = parse(VALID_PLAN + " {}", null);
+
+        assertThat(result.status()).isEqualTo(ActionIntentParser.Status.FAILED);
+        assertThat(result.failureCode()).isEqualTo(ActionIntentParser.INVALID_MODEL_RESPONSE);
+        assertThat(result.plan()).isNull();
+    }
+
+    @Test
+    void rejectsMultipleChoicesInsteadOfUsingTheFirst() {
+        Generation first = response(VALID_PLAN, null).getResult();
+        Generation second = response(VALID_PLAN, null).getResult();
+        this.chatModel = prompt -> new ChatResponse(List.of(first, second));
+
+        ActionIntentParser.Result result = parser().parse(request(), runtime(this.chatModel));
+
+        assertThat(result.status()).isEqualTo(ActionIntentParser.Status.FAILED);
+        assertThat(result.failureCode()).isEqualTo(ActionIntentParser.INVALID_MODEL_RESPONSE);
+        assertThat(result.plan()).isNull();
+    }
+
+    @Test
+    void rejectsUnsupportedSchemaConstraintInsteadOfPretendingValidation() throws Exception {
+        ActionIntentParser.Request request = new ActionIntentParser.Request("导出cny货币字典",
+                ToolDefinition.builder().name("create_task").description("创建任务")
+                        .inputSchema("{\"type\":\"object\",\"properties\":{\"type\":{"
+                                + "\"type\":\"string\",\"pattern\":\"^EXPORT$\"}},\"required\":[\"type\"]}")
+                        .build(), ORIGINAL);
+
+        ActionIntentParser.Result result = parseWithRequest(plan("{\"type\":\"IMPORT\",\"defCodes\":[]}"), request);
+
+        assertThat(result.status()).isEqualTo(ActionIntentParser.Status.FAILED);
+        assertThat(result.failureCode()).isEqualTo(ActionIntentParser.INVALID_ACTION_ARGUMENTS);
+    }
+
+    @Test
     void planningCallbackCannotExecuteAnInternalAction() {
         AtomicInteger executions = new AtomicInteger();
         this.chatModel = prompt -> {

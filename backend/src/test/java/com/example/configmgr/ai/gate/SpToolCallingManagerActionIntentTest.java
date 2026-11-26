@@ -3,6 +3,7 @@ package com.example.configmgr.ai.gate;
 import com.example.configmgr.ai.config.AiProperties;
 import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.history.SyntheticMessages;
+import com.example.configmgr.ai.form.CreateTaskDetailsForm;
 import com.example.configmgr.ai.intent.ActionIntentParser;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.run.CancellationRegistry;
@@ -15,6 +16,7 @@ import com.example.configmgr.ai.run.StreamViolationException;
 import com.example.configmgr.ai.run.ToolActivityBeacon;
 import com.example.configmgr.ai.slot.DefinitionCatalog;
 import com.example.configmgr.ai.slot.SlotDefinition;
+import com.example.configmgr.ai.tenant.RequestContextUtils;
 import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.ToolMeta;
 import com.example.configmgr.ai.tool.ToolRegistry;
@@ -40,6 +42,8 @@ import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.Duration;
@@ -58,6 +62,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -131,6 +136,8 @@ class SpToolCallingManagerActionIntentTest {
         snapshot.setRunId(RUN_ID);
         snapshot.setSessionId("session-action-intent");
         snapshot.setStatus(RunSnapshot.RUNNING);
+        snapshot.setTenantId(1L);
+        snapshot.setUserId(101L);
         snapshot.setContext(AiContext.empty().toMap());
         when(this.store.get(RUN_ID)).thenReturn(snapshot);
         when(this.store.runKey(RUN_ID)).thenReturn("ai:run:" + RUN_ID);
@@ -211,6 +218,8 @@ class SpToolCallingManagerActionIntentTest {
 
     @Test
     void stillUnresolvedAfterOneParseDoesNotReachHitlOrTriggerAnotherParse() {
+        CreateTaskDetailsForm detailsForm = mock(CreateTaskDetailsForm.class);
+        this.manager.setCreateTaskDetailsForm(detailsForm);
         installModel("{\"actions\":[{\"id\":\"a1\",\"tool\":\"create_task\",\"arguments\":"
                 + "{\"type\":\"EXPORT\",\"defCodes\":[\"仍未知\"],\"conditions\":{}},"
                 + "\"unresolved\":[\"definition\"],\"dependsOn\":[]}]}");
@@ -218,10 +227,11 @@ class SpToolCallingManagerActionIntentTest {
         execute(ORIGINAL, List.of(new UserMessage("导出cny货币字典")));
 
         assertThat(this.modelCalls).hasValue(1);
+        verifyNoInteractions(detailsForm);
         verifyNoInteractions(this.preflight);
         verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
         PendingToolCall pending = capturedPending();
-        assertThat(pending.getCode()).isEqualTo(CreateTaskReferenceResolver.UNRESOLVED_CODE);
+        assertThat(pending.getCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
         assertThat(pending.isExecuted()).isFalse();
     }
 
@@ -295,6 +305,89 @@ class SpToolCallingManagerActionIntentTest {
     }
 
     @Test
+    void realCancellationBeforeParseSkipsModelAndHitl() {
+        CancellationRegistry cancellations = installRealCancellationRegistry();
+        try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+            cancellations.register(RUN_ID);
+            cancellations.cancel(RUN_ID, "test-cancel-before");
+            installModel(PARSED_PLAN);
+
+            assertThatThrownBy(() -> execute(ORIGINAL, List.of(new UserMessage("导出cny货币字典"))))
+                    .isInstanceOfSatisfying(StreamViolationException.class,
+                            ex -> assertThat(ex.getCode()).isEqualTo(StreamViolationException.CANCELLED));
+            assertThat(this.modelCalls).hasValue(0);
+            verifyNoInteractions(this.preflight);
+            verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+            verify(this.store, never()).putPending(anyString(), any(PendingToolCall.class));
+        }
+    }
+
+    @Test
+    void realCancellationDuringParseCancelsFutureAndClosesListener() throws Exception {
+        CancellationRegistry cancellations = installRealCancellationRegistry();
+        this.properties.getTool().setExecTimeout(Duration.ofSeconds(2));
+        CountDownLatch started = new CountDownLatch(1);
+        CountDownLatch modelInterrupted = new CountDownLatch(1);
+        this.chatModel = prompt -> {
+            this.modelCalls.incrementAndGet();
+            started.countDown();
+            try {
+                new CountDownLatch(1).await();
+            }
+            catch (InterruptedException ex) {
+                modelInterrupted.countDown();
+                Thread.currentThread().interrupt();
+            }
+            return null;
+        };
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+            cancellations.register(RUN_ID);
+            Future<?> execution = executor.submit(() -> {
+                try (RequestContextUtils.SafeCloseable workerIdentity = RequestContextUtils.useContext(1L, 101L)) {
+                    execute(ORIGINAL, List.of(new UserMessage("导出cny货币字典")));
+                }
+            });
+            assertThat(started.await(2, TimeUnit.SECONDS)).isTrue();
+            cancellations.cancel(RUN_ID, "test-cancel-during");
+
+            assertThatThrownByExecution(execution);
+            assertThat(modelInterrupted.await(1, TimeUnit.SECONDS)).isTrue();
+            assertThat(cancellations.status(RUN_ID)).containsEntry("listeners", 0);
+            verifyNoInteractions(this.preflight);
+            verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+            verify(this.store, never()).putPending(anyString(), any(PendingToolCall.class));
+        }
+        finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void realCancellationAfterModelReturnRejectsPlanBeforePreflight() {
+        CancellationRegistry cancellations = installRealCancellationRegistry();
+        try (RequestContextUtils.SafeCloseable ignored = RequestContextUtils.useContext(1L, 101L)) {
+            cancellations.register(RUN_ID);
+            this.chatModel = prompt -> {
+                this.modelCalls.incrementAndGet();
+                try (RequestContextUtils.SafeCloseable workerIdentity = RequestContextUtils.useContext(1L, 101L)) {
+                    cancellations.cancel(RUN_ID, "test-cancel-after-model");
+                }
+                return parserResponse(PARSED_PLAN);
+            };
+
+            assertThatThrownBy(() -> execute(ORIGINAL, List.of(new UserMessage("导出cny货币字典"))))
+                    .isInstanceOfSatisfying(StreamViolationException.class,
+                            ex -> assertThat(ex.getCode()).isEqualTo(StreamViolationException.CANCELLED));
+            assertThat(this.modelCalls).hasValue(1);
+            assertThat(cancellations.status(RUN_ID)).containsEntry("listeners", 0);
+            verifyNoInteractions(this.preflight);
+            verify(this.gate, never()).awaitDecision(anyString(), any(PendingToolCall.class));
+            verify(this.store, never()).putPending(anyString(), any(PendingToolCall.class));
+        }
+    }
+
+    @Test
     void parserSystemFailureHasNoBusinessSideEffectsOrModelRetry() {
         AtomicInteger catalogCalls = new AtomicInteger();
         DefinitionCatalog catalog = () -> {
@@ -322,10 +415,24 @@ class SpToolCallingManagerActionIntentTest {
         this.chatModel = prompt -> {
             this.modelCalls.incrementAndGet();
             this.modelPrompt.set(prompt);
-            AssistantMessage assistant = AssistantMessage.builder().toolCalls(List.of(new AssistantMessage.ToolCall(
-                    "plan-1", "function", ActionIntentParser.PLANNING_TOOL, arguments))).build();
-            return new ChatResponse(List.of(new Generation(assistant)));
+            return parserResponse(arguments);
         };
+    }
+
+    private static ChatResponse parserResponse(String arguments) {
+        AssistantMessage assistant = AssistantMessage.builder().toolCalls(List.of(new AssistantMessage.ToolCall(
+                "plan-1", "function", ActionIntentParser.PLANNING_TOOL, arguments))).build();
+        return new ChatResponse(List.of(new Generation(assistant)));
+    }
+
+    private CancellationRegistry installRealCancellationRegistry() {
+        StringRedisTemplate redis = mock(StringRedisTemplate.class);
+        ValueOperations<String, String> values = mock(ValueOperations.class);
+        when(redis.opsForValue()).thenReturn(values);
+        when(values.get(anyString())).thenReturn(null);
+        CancellationRegistry cancellations = new CancellationRegistry(redis, this.properties);
+        ReflectionTestUtils.setField(this.manager, "cancellations", cancellations);
+        return cancellations;
     }
 
     private void execute(String arguments, List<Message> history) {
