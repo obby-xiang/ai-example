@@ -7,6 +7,7 @@ import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.conformance.FrameWire;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.ConfirmGate;
+import com.example.configmgr.ai.gate.CreateTaskEvidenceResolver;
 import com.example.configmgr.ai.gate.CreateTaskReferenceResolver;
 import com.example.configmgr.ai.gate.RunContextRefresher;
 import com.example.configmgr.ai.gate.SpToolCallingManager;
@@ -186,6 +187,10 @@ class CreateEntryCorrectionHitlTest {
                         new SlotDefinition.SlotField("code", "货币代码", true, List.of())))), this.mapper,
                 this.definitionService, this.dataRows);
         manager.setCreateTaskReferenceResolver(referenceResolver);
+        manager.setCreateTaskEvidenceResolver(new CreateTaskEvidenceResolver(() -> List.of(
+                new SlotDefinition("CURRENCY", "货币字典", List.of(
+                        new SlotDefinition.SlotField("code", "货币代码", true, List.of())))),
+                this.mapper, this.definitionService, this.dataRows));
         ConfigDefinition currency = new ConfigDefinition();
         currency.setCode("CURRENCY");
         currency.setName("货币字典");
@@ -198,6 +203,11 @@ class CreateEntryCorrectionHitlTest {
         ConfigDataRow cny = new ConfigDataRow();
         cny.setRowKey("CNY");
         when(this.dataRows.findRow("CURRENCY", "GLOBAL", null, "CNY")).thenReturn(Optional.of(cny));
+        when(this.dataRows.findRowsInScopePaged(org.mockito.ArgumentMatchers.eq("CURRENCY"),
+                org.mockito.ArgumentMatchers.eq("GLOBAL"), org.mockito.ArgumentMatchers.isNull(),
+                any(org.springframework.data.domain.Pageable.class)))
+                .thenReturn(new org.springframework.data.domain.PageImpl<>(List.of(cny),
+                        org.springframework.data.domain.Pageable.ofSize(51), 1));
         manager.setContextRefresher(new RunContextRefresher(this.taskService));
         ReflectionTestUtils.setField(manager, "transcript", this.transcript);
         this.model = new ReasoningAwareOpenAiChatModel(this.api,
@@ -270,6 +280,7 @@ class CreateEntryCorrectionHitlTest {
     @Test
     void unresolvedOriginalSentenceTriggersOneCorrectionAndCanonicalizesBeforeHitl() throws Exception {
         useRealChatClient();
+        useEmptyEvidence();
         String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"cny货币字典\"],\"conditions\":{}}";
         String corrected = "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[\"货币字典\"],"
                 + "\"conditions\":{\"fields\":[{\"fieldCode\":\"货币代码\",\"operator\":\"EQ\",\"value\":\"cny\"}]}}";
@@ -349,6 +360,7 @@ class CreateEntryCorrectionHitlTest {
     @Test
     void failedCorrectionStopsWithoutSecondCorrectionCompensationCardOrTask() {
         useRealChatClient();
+        useEmptyEvidence();
         String unresolved = "{\"type\":\"EXPORT\",\"defCodes\":[\"cny货币字典\"],\"conditions\":{}}";
         when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
                 .thenReturn(Flux.just(toolCallChunk(CALL_ID, AiToolNames.CREATE_TASK, unresolved)),
@@ -378,6 +390,7 @@ class CreateEntryCorrectionHitlTest {
     @Test
     void correctedMissingTypeFailsClosedWithoutTypeFormOrNextHop() {
         useRealChatClient();
+        useEmptyEvidence();
         com.example.configmgr.ai.form.TaskTypeForm taskTypeForm = mock(com.example.configmgr.ai.form.TaskTypeForm.class);
         this.manager.setTaskTypeForm(taskTypeForm);
         unresolvedThenCorrected(AiToolNames.CREATE_TASK, "{\"defCodes\":[],\"conditions\":{}}");
@@ -396,6 +409,7 @@ class CreateEntryCorrectionHitlTest {
     void correctedOtherToolFailsClosedWithoutExecutionOrNextHop() {
         this.properties.getResilience().setTotalBudget(java.time.Duration.ofSeconds(2));
         useRealChatClient();
+        useEmptyEvidence();
         unresolvedThenCorrected(AiToolNames.LIST_TASKS, "{}");
 
         chat();
@@ -412,6 +426,7 @@ class CreateEntryCorrectionHitlTest {
     void correctedMultipleToolsFailClosedWithoutHitl() {
         this.properties.getResilience().setTotalBudget(java.time.Duration.ofSeconds(2));
         useRealChatClient();
+        useEmptyEvidence();
         when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
                 .thenReturn(Flux.just(toolCallChunk(CALL_ID, AiToolNames.CREATE_TASK, UNRESOLVED_ARGUMENTS)),
                         Flux.just(toolCallChunk(List.of(
@@ -454,6 +469,7 @@ class CreateEntryCorrectionHitlTest {
     void correctedResolvedPreflightFailureReturnsDirectWithoutNextHop() throws Exception {
         this.properties.getResilience().setTotalBudget(java.time.Duration.ofSeconds(2));
         useRealChatClient();
+        useEmptyEvidence();
         ToolPreflightService.PreflightReport failure = new ToolPreflightService.PreflightReport(false,
                 Map.of("type", "EXPORT"), List.of(new ToolPreflightService.PreflightReport.Check(
                         "forced preflight failure", false, "corrected preflight must stop")),
@@ -479,8 +495,30 @@ class CreateEntryCorrectionHitlTest {
     }
 
     @Test
+    void originalSentenceUsesDeterministicEvidenceWithoutCorrection() {
+        this.properties.getResilience().setTotalBudget(java.time.Duration.ofSeconds(2));
+        useRealChatClient();
+        when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
+                .thenReturn(Flux.just(toolCallChunk(CALL_ID, AiToolNames.CREATE_TASK, UNRESOLVED_ARGUMENTS)));
+
+        chatWithMessage("cny货币字典");
+
+        RunSnapshot snapshot = this.store.get(RUN_ID);
+        assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+        assertThat(AiContext.fromMap(snapshot.getContext()).getExtra())
+                .doesNotContainKey("createEntryCorrectionUsed");
+        PendingToolCall pending = this.store.pending(RUN_ID, CALL_ID);
+        assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PENDING);
+        assertThat(pending.getArguments()).contains("\"defCodes\":[\"CURRENCY\"]")
+                .contains("\"fieldCode\":\"code\"").contains("\"value\":\"CNY\"");
+        verifyNoInteractions(this.taskService);
+        org.mockito.Mockito.verify(this.api).chatCompletionStream(any(ChatCompletionRequest.class), any());
+    }
+
+    @Test
     void correctionDisclosesOnlyCreateTaskAndUsesReasoningRecovery() {
         useRealChatClient();
+        useEmptyEvidence();
         com.example.configmgr.ai.config.EmptyLengthReasoningRecovery recovery =
                 new com.example.configmgr.ai.config.EmptyLengthReasoningRecovery("low",
                         Map.of("thinking", Map.of("type", "disabled")));
@@ -515,18 +553,29 @@ class CreateEntryCorrectionHitlTest {
     }
 
     @Test
-    void correctedEmptyConditionsFailsClosedWithoutHitlOrThirdCall() {
+    void correctedEmptyConditionsUsesDeterministicEvidenceWithoutThirdCall() {
         useRealChatClient();
+        CreateTaskEvidenceResolver evidenceResolver = org.mockito.Mockito.spy(new CreateTaskEvidenceResolver(() -> List.of(
+                new SlotDefinition("CURRENCY", "货币字典", List.of(
+                        new SlotDefinition.SlotField("code", "货币代码", true, List.of())))),
+                this.mapper, this.definitionService, this.dataRows));
+        org.mockito.Mockito.doReturn(Optional.empty()).doCallRealMethod()
+                .when(evidenceResolver).resolve(anyString(), anyString());
+        this.manager.setCreateTaskEvidenceResolver(evidenceResolver);
         unresolvedThenCorrected(AiToolNames.CREATE_TASK,
                 "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{}}");
 
-        chat();
+        chatWithMessage("cny货币字典");
 
-        assertFailedWithoutFollowUp();
+        assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
         assertOriginalUnresolved();
         PendingToolCall corrected = this.store.pending(RUN_ID, CORRECTED_CALL_ID);
-        assertThat(corrected.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
-        assertThat(corrected.getCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
+        assertThat(corrected.getStatus()).isEqualTo(PendingToolCall.PENDING);
+        assertThat(corrected.getArguments()).contains("\"defCodes\":[\"CURRENCY\"]")
+                .contains("\"fieldCode\":\"code\"").contains("\"value\":\"CNY\"");
+        verifyNoInteractions(this.taskService);
+        org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
+                .chatCompletionStream(any(ChatCompletionRequest.class), any());
     }
 
     @Test
@@ -547,6 +596,7 @@ class CreateEntryCorrectionHitlTest {
     @Test
     void approvedCorrectionDoesNotMarkLaterNavigateToAsCorrectedBatch() throws Exception {
         useRealChatClient();
+        useEmptyEvidence();
         String navigationCall = "call-navigate-after-correction";
         when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
                 .thenReturn(Flux.just(toolCallChunk(CALL_ID, AiToolNames.CREATE_TASK, UNRESOLVED_ARGUMENTS)),
@@ -622,6 +672,7 @@ class CreateEntryCorrectionHitlTest {
     @Test
     void rejectedCreateTaskDoesNotCorrectAgainOrExecute() throws Exception {
         useRealChatClient();
+        useEmptyEvidence();
         unresolvedThenCorrected(AiToolNames.CREATE_TASK, ARGUMENTS);
         chat();
         assertOriginalUnresolved();
@@ -645,6 +696,7 @@ class CreateEntryCorrectionHitlTest {
     @Test
     void cancelledCreateTaskDoesNotCorrectAgainOrExecute() throws Exception {
         useRealChatClient();
+        useEmptyEvidence();
         unresolvedThenCorrected(AiToolNames.CREATE_TASK, ARGUMENTS);
         chat();
         assertOriginalUnresolved();
@@ -741,6 +793,7 @@ class CreateEntryCorrectionHitlTest {
 
     private void assertSecondToolReasoningIsIsolated(String firstReasoning) {
         useRealChatClient();
+        useEmptyEvidence();
         String unresolved = "{\"type\":\"EXPORT\",\"defCodes\":[\"cny货币字典\"],\"conditions\":{}}";
         when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
                 .thenReturn(Flux.just(toolCallChunkWithReasoning(CALL_ID, AiToolNames.CREATE_TASK, unresolved,
@@ -986,6 +1039,12 @@ class CreateEntryCorrectionHitlTest {
                 .chatCompletionStream(any(ChatCompletionRequest.class), any());
     }
 
+    private void useEmptyEvidence() {
+        CreateTaskEvidenceResolver resolver = org.mockito.Mockito.mock(CreateTaskEvidenceResolver.class);
+        when(resolver.resolve(anyString(), anyString())).thenReturn(Optional.empty());
+        this.manager.setCreateTaskEvidenceResolver(resolver);
+    }
+
     private void useRealChatClient() {
         ProviderRuntime runtime = new ProviderRuntime(7L, "openai", "test-model", "http://placeholder",
                 "/chat/completions", "7|fp|u|p", OpenAiChatOptions.builder().model("test-model").build(), this.api,
@@ -999,6 +1058,15 @@ class CreateEntryCorrectionHitlTest {
 
     private void chat() {
         chat(RUN_ID, Map.of());
+    }
+
+    private void chatWithMessage(String message) {
+        AiChatRequest request = new AiChatRequest(SESSION_ID, message,
+                new AiChatRequest.Context("tasks", null, null, null, Map.of()), null, null);
+        try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+                com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
+            this.service.chat(RUN_ID, request, this.registry.of(RUN_ID));
+        }
     }
 
     private void chat(String runId, Map<String, Object> extra) {

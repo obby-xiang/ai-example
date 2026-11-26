@@ -464,6 +464,13 @@ public class SpToolCallingManager implements ToolCallingManager {
         this.createTaskReferenceResolver = resolver;
     }
 
+    private CreateTaskEvidenceResolver createTaskEvidenceResolver;
+
+    @Autowired(required = false)
+    public void setCreateTaskEvidenceResolver(CreateTaskEvidenceResolver resolver) {
+        this.createTaskEvidenceResolver = resolver;
+    }
+
     public SpToolCallingManager(RunStore store, RunRegistry registry, ConfirmGate gate, ToolRegistry toolRegistry,
                                 MessageJsonCodec codec, ToolActivityBeacon beacon, CancellationRegistry cancellations,
                                 ToolResultLimiter limiter, List<FrontendToolGuard> frontendGuards) {
@@ -935,7 +942,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         List<PendingToolCall> pendings = newPendings(assistant);
         AiContext context = AiContext.fromMap(snapshot.getContext());
         Map<String, CreateTaskReferenceResolver.Resolution> createTaskResolutions = bindPendingArguments(runId, context,
-                pendings);
+                prompt, pendings);
         ModelWriteBudget modelBudget = modelWriteBudget(snapshot, prompt, assistant, pendings.size());
         boolean budgetArmed = this.beacon.isBudgetArmed(runId);
         if (budgetArmed) {
@@ -959,10 +966,11 @@ public class SpToolCallingManager implements ToolCallingManager {
     }
 
     private Map<String, CreateTaskReferenceResolver.Resolution> bindPendingArguments(String runId, AiContext context,
+                                                                                    Prompt prompt,
                                                                                     List<PendingToolCall> pendings) {
         Map<String, CreateTaskReferenceResolver.Resolution> resolutions = new LinkedHashMap<>();
         for (PendingToolCall pending : pendings) {
-            CreateTaskReferenceResolver.Resolution resolution = resolveCreateTaskReferences(runId, pending);
+            CreateTaskReferenceResolver.Resolution resolution = resolveCreateTaskReferences(runId, pending, prompt);
             if (resolution != null) {
                 resolutions.put(pending.getToolCallId(), resolution);
             }
@@ -974,7 +982,8 @@ public class SpToolCallingManager implements ToolCallingManager {
         return resolutions;
     }
 
-    private CreateTaskReferenceResolver.Resolution resolveCreateTaskReferences(String runId, PendingToolCall pending) {
+    private CreateTaskReferenceResolver.Resolution resolveCreateTaskReferences(String runId, PendingToolCall pending,
+                                                                               Prompt prompt) {
         if (!TOOL_CREATE_TASK.equals(pending.getName())
                 || com.example.configmgr.ai.form.TaskTypeForm.typeMissingOrInvalid(pending.getArguments())) {
             return null;
@@ -987,6 +996,9 @@ public class SpToolCallingManager implements ToolCallingManager {
             return resolution;
         }
         CreateTaskReferenceResolver.Resolution resolution = this.createTaskReferenceResolver.resolve(pending.getArguments());
+        if (shouldUseEvidence(resolution) && this.createTaskEvidenceResolver != null) {
+            resolution = resolveWithEvidence(pending.getArguments(), lastRealUserText(prompt), resolution);
+        }
         if (resolution.status() == CreateTaskReferenceResolver.Status.RESOLVED) {
             pending.setArguments(resolution.canonicalArguments());
         }
@@ -994,6 +1006,29 @@ public class SpToolCallingManager implements ToolCallingManager {
             blockCreateTaskReferences(runId, pending, resolution);
         }
         return resolution;
+    }
+
+    private boolean shouldUseEvidence(CreateTaskReferenceResolver.Resolution resolution) {
+        return resolution.status() == CreateTaskReferenceResolver.Status.UNRESOLVED
+                || resolution.status() == CreateTaskReferenceResolver.Status.RESOLVED
+                && this.createTaskReferenceResolver.hasEmptyConditions(resolution.canonicalArguments());
+    }
+
+    private CreateTaskReferenceResolver.Resolution resolveWithEvidence(String arguments, String userText,
+                                                                       CreateTaskReferenceResolver.Resolution fallback) {
+        if (StringUtils.isBlank(userText)) {
+            return fallback;
+        }
+        return this.createTaskEvidenceResolver.resolve(arguments, userText)
+                .map(this.createTaskReferenceResolver::resolve)
+                .filter(resolution -> resolution.status() == CreateTaskReferenceResolver.Status.RESOLVED)
+                .orElse(fallback);
+    }
+
+    private static String lastRealUserText(Prompt prompt) {
+        return prompt.getInstructions().stream()
+                .filter(message -> message instanceof UserMessage && !SyntheticMessages.isSynthetic(message))
+                .reduce((first, second) -> second).map(Message::getText).orElse(null);
     }
 
     private static boolean isCreateTaskReferenceBlocked(PendingToolCall pending) {

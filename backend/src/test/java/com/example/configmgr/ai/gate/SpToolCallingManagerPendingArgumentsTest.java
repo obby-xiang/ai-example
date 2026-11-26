@@ -162,6 +162,18 @@ class SpToolCallingManagerPendingArgumentsTest {
     }
 
     @Test
+    void lastRealUserTextIgnoresSyntheticMessages() {
+        Prompt prompt = new Prompt(List.of(new UserMessage("first-real"),
+                com.example.configmgr.ai.history.SyntheticMessages.internalUser("synthetic-last",
+                        com.example.configmgr.ai.history.SyntheticMessages.Kind.CORRECTION, "synthetic"),
+                new UserMessage("last-real")));
+
+        String actual = ReflectionTestUtils.invokeMethod(this.manager, "lastRealUserText", prompt);
+
+        assertThat(actual).isEqualTo("last-real");
+    }
+
+    @Test
     void unresolvedReferencesDoNotReachPreflightOrHitl() {
         installResolver(() -> List.of(currencySlot()));
         String original = "{\"type\":\"EXPORT\",\"defCodes\":[\"未知字典\"],\"conditions\":{}}";
@@ -382,7 +394,7 @@ class SpToolCallingManagerPendingArgumentsTest {
         pending.setName("create_task");
         pending.setArguments(arguments);
         ReflectionTestUtils.invokeMethod(this.manager, "bindPendingArguments", "run-pending-arguments", AiContext.empty(),
-                List.of(pending));
+                new Prompt(List.of(new UserMessage(userText))), List.of(pending));
         return pending;
     }
 
