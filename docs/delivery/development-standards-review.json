@@ -9553,6 +9553,51 @@
           "reason": "首轮5个新增或改规格方法均先单独取得缺少零工具复核的RED并逐一GREEN，另14个取消竞态、非STOP、记录抑制、读取失败及原未决HITL方法逐点GREEN。主控返修轮以空pending加已执行LIST_TASKS ledger取得false的RED，修正后该方法及secondPlainAnswer、两个plainStop拒绝/取消、原未决HITL共5个指定方法逐一GREEN；未运行类级或批量测试。生产文件再次执行IDEA Reformat Code结果为ok；本轮首个GREEN实际编译364个生产源文件成功，最终Maven -DskipTests -Dmaven.compiler.useIncrementalCompilation=false compile退出0。真实模型、服务和Redis均为NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:b4da5037725dcbda0acf6354538e891224e223637f03c79492752c12ecd84dd4",
+      "status": "reviewed",
+      "reason": "对新增289行研究Markdown的最终暂存内容逐段静态自审：以完整报告为主体保留aab3c8e1基线、生产范围、A/B/C/D/E清单、触发链、路径行号、最小建议、施工顺序和NOT_RUN边界；删除权限与落盘过程噪声并将状态修正为已入库。文首和验证表明确这是静态代码审查而非运行验证，不混入真实复测结果；仓外原始报告仅作索引，关键结论和证据已在仓内自包含。主控已完整阅读新增289行研究文档和本条目，逐段静态复核通过，门禁指纹匹配。提交时pre-commit拦截第280-281行两处仓外绝对路径；随后仅将完整报告和主控摘要路径改为<deepseek-ai-user-notice-audit>下的angle-bracket占位路径，保留证据含义，其他正文未改，并据最终暂存文档重新计算指纹。",
+      "reviewedAt": "2026-11-27T15:15:42+08:00",
+      "reviewer": "Kimi 主控逐段复核 / K3.1 Pro 文档整理",
+      "specChanges": [],
+      "files": [
+        {
+          "path": "docs/research/审查-AI对话提示与用户打扰-2026-11-27.md",
+          "status": "checked",
+          "reason": "新增研究文档完整承接原始A1-A7、B1-B12、C1-C4、D类八组保留项和E类候选/排除项；高优先级archive-window、模型回执透传与预检技术文本均保留触发链及最小建议，E7明确不得误删。文档只记录基线静态审查和建议施工顺序，没有宣称建议已施工或运行效果已验证。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批只新增Markdown研究文档和审查ledger，没有修改manifest、锁文件、生产imports或工具库，文中组件名称仅用于定位既有代码。"
+        },
+        "java-api-style": {
+          "status": "not-affected",
+          "reason": "未修改Java源码、集合、注解、JSON实体或前端可执行代码；文档中的Java路径和方法名只是静态证据索引，不触发API形态变化。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "文档仅保留安全业务码、路径、行号和摘要，不包含密钥、对话正文样本、原始上游响应或原始异常体；对未知执行、未确认结局和可能副作用均要求真实呈现，未建议吞错或包装成功。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "静态审查覆盖恢复条、通知槽、工具卡、表单和确认卡的用户打扰，最小建议优先静默内部恢复、业务化文案和完成收口；D类不可逆审批、影响面、数据丢失与未知状态明确保留。本批未实际修改文案、i18n、卡片或交互。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "报告区分archive-window永久缺口与unconfirmed未知结局，重试建议不得诱导重复副作用，未确认、已执行和未发送事实不得静默；没有修改API、SSE、Redis、数据库、状态机或模型并发，也未将静态结论外推至多实例运行验证。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批为中文Markdown整理，未修改字节流、SSE分帧、UTF-8解码、代理对、字素簇或截断实现，文中截断提示仅是用户文案审查项。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "证据表将生产消费者追踪和主控抽查标为已完成（静态），测试、服务和浏览器为NOT_RUN，运行态触发频率为UNKNOWN，真实复测结果未纳入。纯文档变更没有生产或测试代码，因此IDEA Reformat Code与编译不需要且未执行；本批亦未使用CU、未派子代理、未启动或重启服务。"
+        }
+      }
     }
   ]
 }
