@@ -1433,7 +1433,7 @@ public class ResumeService {
         if (!userDecision) {
             return null;
         }
-        this.chatService.cancelParked(state.runId);
+        this.chatService.cancelParkedForDecision(state.runId);
         RunSnapshot latest = this.store.get(state.runId);
         if (latest != null && RunSnapshot.CANCELLED.equals(latest.getStatus())) {
             state.body.put("resumed", false);

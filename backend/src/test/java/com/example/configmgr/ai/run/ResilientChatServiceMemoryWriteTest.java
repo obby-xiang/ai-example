@@ -383,7 +383,8 @@ class ResilientChatServiceMemoryWriteTest {
 
 		assertThat(result.outcome()).isEqualTo(ResumeService.Outcome.ALREADY_CANCELLED);
 		assertThat(FrameContract.types(wire.frames())).contains("done");
-		assertThat(FrameContract.oneOfType(wire.frames(), "done")).containsEntry("cancelled", true);
+		assertThat(FrameContract.oneOfType(wire.frames(), "done")).containsEntry("cancelled", true)
+			.containsEntry("userStopped", true);
 		assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
 		assertThat(this.store.pending(RUN_ID, "call-parked-cancel").getStatus()).isEqualTo(PendingToolCall.CANCELLED);
 		assertThat(contextStore.read(SESSION_ID).usedTokens()).isPositive();

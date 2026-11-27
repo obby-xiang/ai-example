@@ -5113,6 +5113,7 @@ export const useAiStore = defineStore('ai', {
     businessWriteBlocked(state): boolean {
       return state.restoringRecovery || state.manualRecovery !== null
         && state.manualRecovery.reason !== 'transcript-degraded'
+        && state.manualRecovery.reason !== 'archive-window'
     },
     /** 输入区是否可用（执行中/恢复在途禁发；transcript 降级不锁新轮）。 */
     canSend(state): boolean {
@@ -6317,6 +6318,7 @@ export const useAiStore = defineStore('ai', {
               partStatus = 'succeeded'
             }
             part.userTextCode = matched?.userTextCode === undefined ? state?.userTextCode : matched.userTextCode
+            part.userTextArgs = matched?.userTextArgs === undefined ? state?.userTextArgs : matched.userTextArgs
             if (matched) {
               part.result = matched.responseData ?? null
               if (matched.target || state?.target) {
@@ -6391,8 +6393,8 @@ export const useAiStore = defineStore('ai', {
           ...(item.unconfirmed === true || item.outcome === 'UNCONFIRMED' ? { unconfirmed: true } : {}),
           // 批次2：服务端条目带 runId 时落消息，保留恢复链路的 run 归属（40 条记忆窗口通常无此键）
           ...(runId !== null ? { runId } : {}),
-          // 批G · S4：stopped 元数据或规范 CANCELLED 终态都恢复为「已停止」，不归一成普通完成。
-          ...(item.stopped === true || item.outcome === 'CANCELLED' ? { stopped: true } : {}),
+          // 只有明确的 stopped 元数据代表用户主动停止整轮；CANCELLED 也可能是 HITL 拒绝或放弃当前动作。
+          ...(item.stopped === true ? { stopped: true } : {}),
           // 截断专项：长度截断（finish_reason=length）的回答不完整 —— 刷新后仍要提示
           ...(item.truncated === true ? { truncated: true } : {})
         }
@@ -6935,7 +6937,6 @@ export const useAiStore = defineStore('ai', {
         const expiryAnchor = runExpiryAnchorOf(current, Date.now())
         if (expiryAnchor === null && this.runExpiry !== null
           && runExpiryRemainingMs(this.runExpiry, Date.now()) <= 0) {
-          setNotice(this, 'ai.notice.runExpired')
           this.runExpiry = { ...this.runExpiry, remainingMs: 0, receivedAtMs: Date.now() }
         } else {
           this.runExpiry = expiryAnchor
@@ -7235,6 +7236,9 @@ export const useAiStore = defineStore('ai', {
           clearTerminalHistoryFollowups(this.sessionId)
         }
       }
+      const terminalUserStopped = frame && (frame.type === 'done' || frame.type === 'error')
+        ? frame.userStopped
+        : undefined
       for (const host of hosts) {
         host.streaming = false
         host.done = true
@@ -7242,15 +7246,16 @@ export const useAiStore = defineStore('ai', {
         delete host.interruptedReason
         sealTrailingStreamPart(host)
         expireResidueToolParts(host)
-        if (cancelled) {
+        // 没有 done/error 终帧时，CANCELLED 快照不能证明主动停止；已有本地 stopped 事实保持不动。
+        if (cancelled && (frame?.type === 'done' || frame?.type === 'error') && terminalUserStopped !== false) {
           host.stopped = true
-        } else if (hasUnconfirmed) {
+        } else if (!cancelled && hasUnconfirmed) {
           host.code = code ?? host.code ?? null
           host.errorCard = null
           if (!unconfirmedRecoveryRegistered) {
             this.recoverUnconfirmedTerminal(host)
           }
-        } else {
+        } else if (!cancelled) {
           if (code !== null) {
             host.code = code
             host.errorCard = buildErrorCard(code, message ?? translate('ai.notice.chatRequestFailed'))
@@ -10131,11 +10136,9 @@ export const useAiStore = defineStore('ai', {
         }
         // 卡片身份校验：只接受仍待决的确认门段（终态段 / 前端工具卡不得经此提交）
         if (!runId || !part) {
-          setNotice(this, 'ai.notice.noPendingDecision')
           return
         }
         if (part.kind2 !== 'CONFIRM' || part.status !== 'pending' || !part.requiresAction) {
-          setNotice(this, 'ai.notice.noPendingDecision')
           return
         }
         name = part.name
@@ -10143,7 +10146,6 @@ export const useAiStore = defineStore('ai', {
       } else {
         const pending = this.pendingToolCall as PendingToolCall | null
         if (!pending || !runId) {
-          setNotice(this, 'ai.notice.noPendingDecision')
           return
         }
         toolCallId = pending.toolCallId
@@ -10157,7 +10159,6 @@ export const useAiStore = defineStore('ai', {
       // R-166 口径③（源头防重）：**点击即入在途表**，同 toolCallId 最多提交一次。
       // 双按钮连点 / 程序化重入在此短路（面板另据 gateSubmissions 禁用按钮，纵深两道）。
       if (this.gateSubmissions[toolCallId]) {
-        setNotice(this, 'ai.notice.decisionSubmitting')
         return
       }
       // 批4-D（纵深两道）：不可撤销卡必须**已勾选**才放行「批准」—— 面板已把按钮置灰，
@@ -10236,7 +10237,6 @@ export const useAiStore = defineStore('ai', {
           // 改为不写任何乐观裁决：撤乐观写 → 置「已提交，同步中…」瞬态 → 等 SSE 结局帧 →
           // 3 秒未达则拉 runs/current 落真实裁决回执。
           this.markGateSyncing(toolCallId, { name, kind })
-          setNotice(this, 'ai.notice.decisionIdempotent')
           this.armGateSync(toolCallId)
           return
         }
@@ -10466,12 +10466,16 @@ export const useAiStore = defineStore('ai', {
         if (error instanceof ApiError) {
           logCaughtError(error, 'stores/ai.ts:8502')
           const fallback = translate('ai.notice.toolSubmitFailed')
-          setNotice(this, 'ai.notice.toolSubmitFailed')
+          if (this.activeForm?.toolCallId !== toolCallId || this.activeForm.status !== 'submitting') {
+            setNotice(this, 'ai.notice.toolSubmitFailed')
+          }
           return { ok: false, message: fallback }
         }
         // Task 3：非后端错误（内部异常 / 网络桩）一律落本地化兜底 —— 原文不上屏、也不回给表单。
         const fallback = translate('ai.notice.toolSubmitFailed')
-        setNotice(this, 'ai.notice.toolSubmitFailed')
+        if (this.activeForm?.toolCallId !== toolCallId || this.activeForm.status !== 'submitting') {
+          setNotice(this, 'ai.notice.toolSubmitFailed')
+        }
         return { ok: false, message: fallback }
       }
     },
@@ -11080,9 +11084,7 @@ export const useAiStore = defineStore('ai', {
         this.activeUploadHandoff = {
           ...pickingHandoff,
           status: 'waiting',
-          reason: aborted
-            ? translate('ai.notice.uploadPickerCancelled')
-            : translate('ai.notice.uploadPickerFailed')
+          reason: aborted ? null : translate('ai.notice.uploadPickerFailed')
         }
         this.uiAnnouncement = pickUiAnnouncement()
         return
@@ -12837,8 +12839,8 @@ export const useAiStore = defineStore('ai', {
      *   会话（有存量就用存量，没有才向后端发号）；</li>
      * <li>没有身份 / 身份已不在目录 ⇒ 落到**目录第一项**，进入身份模式并发号；这两个入口
      *   （`enterIdentity` 缺省 = 启动补入）保留旧指针与旧镜像（同一身份的会话可恢复），不混用；</li>
-     * <li>目录不可用（端点缺失 / 请求失败 / 空目录）⇒ `directoryStatus = 'unavailable'`：面板给
-     *   明确横幅 + 重试，**发送禁用**。绝不静默切到"本地造号 + 无身份头"的旧分支。</li>
+     * <li>目录请求失败 ⇒ 自动补一次；仍失败或目录为空 ⇒ `directoryStatus = 'unavailable'`：
+     *   面板显示对应横幅，**发送禁用**。空目录不自动重试，绝不静默切到无身份请求。</li>
      * </ul>
      */
     /**
@@ -12874,21 +12876,29 @@ export const useAiStore = defineStore('ai', {
       this.directoryStatus = 'loading'
       this.directoryError = null
       let directory: TenantUsersEntry[] = []
+      let raw: unknown
       try {
-        const raw = await load()
+        raw = await load()
+      } catch (firstError) {
         if (entryEpoch !== sessionEpoch) {
           return
         }
-        directory = Array.isArray(raw) ? raw.map(normalizeTenantEntry).filter((entry): entry is TenantUsersEntry => entry !== null) : []
-      } catch (error) {
-        if (entryEpoch !== sessionEpoch) {
+        logCaughtError(firstError, 'ai:directory:first-attempt')
+        try {
+          raw = await load()
+        } catch (error) {
+          if (entryEpoch !== sessionEpoch) {
+            return
+          }
+          this.directoryStatus = 'unavailable'
+          this.directoryError = userFacingErrorText(error, translate('ai.notice.directoryFailed'))
           return
         }
-        this.directoryStatus = 'unavailable'
-        // 返修 round3：异常原文不上屏 —— 本地化兜底。
-        this.directoryError = userFacingErrorText(error, translate('ai.notice.directoryFailed'))
+      }
+      if (entryEpoch !== sessionEpoch) {
         return
       }
+      directory = Array.isArray(raw) ? raw.map(normalizeTenantEntry).filter((entry): entry is TenantUsersEntry => entry !== null) : []
       this.tenantDirectory = directory
       if (directory.length === 0) {
         this.directoryStatus = 'unavailable'
@@ -13135,16 +13145,23 @@ export const useAiStore = defineStore('ai', {
         try {
           // 会话号唯一来源 = `createSession()` 的 `sessionIdText` 字符串。
           issued = normalizeSessionId(await issue())
-        } catch (error) {
-            logCaughtError(error, 'stores/ai.ts:11135')
-          if (token === sessionGateToken) {
-            // 返修 round3：显式失败态（横幅据此显示），与"正在发号"区分，避免正常窗口闪红条。
-            this.sessionIssueFailed = true
-            setNotice(this, 'ai.notice.sessionIssueFailed')
+        } catch (firstError) {
+          if (token !== sessionGateToken || entryEpoch !== sessionEpoch || !isSameIdentity(this.identity, identity)) {
+            return ''
           }
-          return ''
+          logCaughtError(firstError, 'ai:session-issue:first-attempt')
+          try {
+            issued = normalizeSessionId(await issue())
+          } catch (error) {
+            logCaughtError(error, 'ai:session-issue:retry')
+            if (token === sessionGateToken && entryEpoch === sessionEpoch && isSameIdentity(this.identity, identity)) {
+              this.sessionIssueFailed = true
+              setNotice(this, 'ai.notice.sessionIssueFailed')
+            }
+            return ''
+          }
         }
-        if (issued === '' || token !== sessionGateToken || !isSameIdentity(this.identity, identity)) {
+        if (issued === '' || token !== sessionGateToken || entryEpoch !== sessionEpoch || !isSameIdentity(this.identity, identity)) {
           return ''
         }
         this.sessionIssueFailed = false
@@ -14274,12 +14291,8 @@ export const useAiStore = defineStore('ai', {
           break
         }
         case 'retry':
-          // 2026-10-29 收口：空回复轮的重试（后端 additive 键 `emptyReply=true`）**不是**断流 ——
-          // 后端明确说明这是"零产出轮只重跑模型步"。旧实现一律写"上游连接中断，正在重试
-          // （本轮尚未产出内容）"，把一次正常重试说成了连接故障。这里按既有词条给事实
-          //（"模型没有返回任何内容"），不新增 locale 键、不改文案规格。
+          // 空回复内部重试静默；若最终仍失败，EMPTY_REPLY 终帧继续显示真实错误。
           if (frame.emptyReply === true) {
-            setNotice(this, 'ai.card.error.summary.emptyReply')
             break
           }
           setNotice(this, 'ai.notice.upstreamRetry')
@@ -14336,7 +14349,9 @@ export const useAiStore = defineStore('ai', {
             // tool_result），并在消息尾打「已停止」标记（与「继续」入口互斥）。
             // 问题1：零产出轮同样要打停止事实 —— 否则面板会把这次取消读成可重试的失败轮。
             this.cancelRoundParts(message.runId)
-            message.stopped = true
+            if (frame.userStopped !== false) {
+              message.stopped = true
+            }
             this.lastRoundOutcome = 'cancelled'
           } else {
             // run 的业务完成与 transcript 完整性分开记录；其他真实错误码仍按普通失败处理。
@@ -14405,7 +14420,9 @@ export const useAiStore = defineStore('ai', {
             if (message.runId) {
               clearUnconfirmedHistoryMarkers(this.sessionId, message.runId)
             }
-            message.stopped = true
+            if (frame.userStopped !== false) {
+              message.stopped = true
+            }
             message.errorCard = null
             // 取消不是断流、不是错误：本轮残留的断流提示一并收口（不新增提示）。
             this.streamInterrupted = false
@@ -14676,8 +14693,8 @@ export const useAiStore = defineStore('ai', {
      * 1. **AR-08 事件驱动刷新**：只要作业号取到了就通知任务中心（`taskStore.notifyJobEvent`）——
      *    用户在任务中心时向导页并没有挂载（没有页面 handler），但列表同样需要这一次事实更新。
      *    三条件（在途 / 可见 / 观察窗）由 task store 判，这里只负责"事件发生了"。
-     * 2. **失败回执可见**：handler 返回 `{ ok:false, reason }` 或直接抛错 ⇒ 落一条 warning 通知，
-     *    不再 `.catch(() => undefined)` 静默吞掉（"页面没同步上"必须让用户看得见）。
+     * 2. **一次有界自动恢复**：handler 返回 `{ ok:false, reason }` 或直接抛错时，仍在原会话/轮次
+     *    才自动补一次；连续失败才显示定稿提示，内部 reason 与异常原文不上屏。
      *
      * 作业号 / 任务号任一取不到即静默跳过：作业在后端照常跑，用户回到向导页时
      * `loadTask → resumeJobs` 仍会接上。
@@ -14707,31 +14724,37 @@ export const useAiStore = defineStore('ai', {
       if (!handler) {
         return
       }
-      void Promise.resolve(handler({ taskId, jobId, toolCallId: frame.toolCallId }))
-        .then((outcome) => {
-          const failure = startJobSyncFailure(outcome)
-          if (failure !== null) {
-            this.noticeStartJobSyncFailure(jobId, failure.reason)
-          }
-        })
-        .catch((error: unknown) => {
+      const entrySessionEpoch = sessionEpoch
+      const round = captureRound(this.sessionId, frame.runId ?? this.activeRunId ?? null)
+      const stillCurrent = (): boolean => entrySessionEpoch === sessionEpoch
+        && isStillSameRound(round, this.sessionId, this.activeRunId ?? null)
+      const attempt = async (): Promise<{ reason: string | null } | null> => {
+        try {
+          return startJobSyncFailure(await handler({ taskId, jobId, toolCallId: frame.toolCallId }))
+        } catch (error) {
           logCaughtError(error, 'ai:job-sync')
-          this.noticeStartJobSyncFailure(jobId, null)
-        })
+          return { reason: null }
+        }
+      }
+      void (async () => {
+        let failure = await attempt()
+        if (failure !== null && stillCurrent()) {
+          failure = await attempt()
+        }
+        if (failure !== null && stillCurrent()) {
+          this.noticeStartJobSyncFailure()
+        }
+      })()
     },
 
     /**
-     * 批次 5B：作业同步失败的可见回执（`ai.notice.startJobSyncFailed*`）。
+     * 作业同步连续失败后的可见回执（`ai.notice.startJobSyncFailed`）。
      *
      * 走通知槽而不是错误卡：作业本身在后端正常运行，失败的是"页面跟踪面没接上"这一步 ——
      * 这是提示级事实，不是轮次错误（错误卡会让人以为作业没起来）。
      */
-    noticeStartJobSyncFailure(jobId: number, reason: string | null): void {
-      if (reason === null) {
-        setNotice(this, 'ai.notice.startJobSyncFailed', { jobId }, 'warning')
-        return
-      }
-      setNotice(this, 'ai.notice.startJobSyncFailedReason', { jobId, reason }, 'warning')
+    noticeStartJobSyncFailure(): void {
+      setNotice(this, 'ai.notice.startJobSyncFailed', undefined, 'warning')
     },
 
     /**
@@ -14880,6 +14903,7 @@ export const useAiStore = defineStore('ai', {
         kind2: 'FRONTEND',
         status: 'unknown',
         result: UNCERTAIN_RECOVERY_TEXT,
+        userTextCode: 'UNCERTAIN_RECOVERY',
         requiresAction: false
       })
       // 这里只能证明“这一条工具的执行事实未知”，不能提前宣称整轮已结束；其它待决卡仍可继续。
@@ -14889,7 +14913,7 @@ export const useAiStore = defineStore('ai', {
       this.followupReady = false
       this.clearSuspendedIfNoOtherConfirms(frame.toolCallId)
       if (!submitted.ok) {
-        setRawNotice(this, UNCERTAIN_RECOVERY_TEXT, 'warning')
+        setNotice(this, 'ai.panel.toolResult.UNCERTAIN_RECOVERY', undefined, 'warning')
       }
       return submitted.ok
     },
@@ -15124,6 +15148,7 @@ export const useAiStore = defineStore('ai', {
             kind2: 'FRONTEND',
             status: 'failed',
             result: EXECUTOR_CRASH_TEXT,
+            userTextCode: 'FRONTEND_EXECUTOR_FAILED',
             requiresAction: false
           })
           deriveProjections(message)
@@ -15201,11 +15226,17 @@ export const useAiStore = defineStore('ai', {
         kind2: 'FRONTEND',
         status,
         result: execution.result,
+        ...(execution.userTextCode !== undefined ? { userTextCode: execution.userTextCode } : {}),
+        ...(execution.userTextArgs !== undefined ? { userTextArgs: execution.userTextArgs } : {}),
         requiresAction: false
       })
       deriveProjections(message)
       if (execution.availability === 'degraded' || execution.availability === 'unavailable') {
-        setRawNotice(this, execution.result)
+        if (execution.userTextCode) {
+          setNotice(this, `ai.panel.toolResult.${execution.userTextCode}`, execution.userTextArgs)
+        } else {
+          setRawNotice(this, execution.result)
+        }
       }
       // AI 可视可操作专项：把原语运行时的一次性播报同步给面板
       this.syncUiRuntimeState()

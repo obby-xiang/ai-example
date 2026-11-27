@@ -9598,6 +9598,187 @@
           "reason": "证据表将生产消费者追踪和主控抽查标为已完成（静态），测试、服务和浏览器为NOT_RUN，运行态触发频率为UNKNOWN，真实复测结果未纳入。纯文档变更没有生产或测试代码，因此IDEA Reformat Code与编译不需要且未执行；本批亦未使用CU、未派子代理、未启动或重启服务。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:7520f08f3b4b2d86b6206b84010b6e8931470a0166b63dd0c1658e24b107dd5a",
+      "status": "reviewed",
+      "reason": "对最终暂存的19个生产文件逐hunk自审：保留原三项停止来源、空回复看门狗和创建纠正修复，并并入经批准的通知去重、用户文案、恢复条、有界自动恢复、预检摘要及实时cancelled wire来源返修。主控复核后最小返修只读拒绝红条、workspace发布取消码及start_publish主动停止映射；再次复核补齐无lastFrame的CANCELLED快照边界：不新写stopped，本地主动停止标记保留，history显式事实仍恢复。模型result/failureMessage与check明细保持原值，其他failed/blocked和workspace失败提示不丢失。主控已完成全部最终暂存生产hunk逐hunk复核并通过，三项功能、文案用户投影、实时/快照/历史停止来源、只读拒绝红条、workspace发布取消及三轮返修边界均已覆盖，最终指纹匹配。",
+      "reviewedAt": "2026-11-27T18:21:45+08:00",
+      "reviewer": "Kimi主控逐hunk复核 / K3.1 Pro施工与单点验证",
+      "specChanges": [
+        {
+          "change": "CANCELLED run不再等同用户主动停止整轮：只有明确主动停止来源写assistant stopped=true，HITL拒绝或放弃当前动作保持run/pending原终态但不写stopped；前端实时与历史只认明确stopped事实。",
+          "reason": "通用取消收尾和前端CANCELLED兜底把已拒绝动作误显示成已停止，并在刷新后复活；只修一端不能消除实时和历史两种误标。",
+          "impact": "所有HITL拒绝/前端放弃均适用，不针对create_task；拒绝卡、零副作用、单卡、无第三跳和取消优先保持，主动stop/C1仍显示已停止且刷新可恢复。"
+        },
+        {
+          "change": "StreamWatchdog的段预算起点与attempt上游静默起点分离，重试首包和事件间静默从本次attempt startedAt计算，segmentSeedAtMs继续使用段起点。",
+          "reason": "空回复重试把turnStartedAtMs同时用于两个锚点，导致第二attempt在第一拍继承第一attempt累计静默并误报FIRST_BYTE_TIMEOUT。",
+          "impact": "第二attempt自身超过first-byte/inter-event阈值仍真实超时，30s等配置不放大；每次重试不获得新段预算，TOTAL_BUDGET与maxAttempts语义不变。"
+        },
+        {
+          "change": "createEntryCorrection通过工具上下文显式区分missing-action与references-unresolved；仅MISSING_ACTION允许已解析create_task以conditions={}进入正常HITL，未决引用补全仍要求非空完整条件。",
+          "reason": "零工具创建遗漏的工具规格允许条件未决定时传conditions={}，但prepareCorrectedCreateTaskBatch把两类correction统一按未决引用补全校验，导致真实Flash第二次RESOLVED仍被CREATE_TASK_REFERENCE_RESOLUTION_FAILED阻断。",
+          "impact": "defCodes=[]和已知配置都可进入单张创建确认卡，批准前零副作用；未决引用空条件继续fail-closed，完整有效条件正常确认。每run一次、两次上游、defCodes/fields解析、取消/拒绝和transcript约束均不变。"
+        },
+        {
+          "change": "工具结果、前端执行和预检失败按用户可见摘要与模型内部回执分层；新增可选userTextCode/userTextArgs，预检按失败check白名单投影业务准备原因。",
+          "reason": "同一result同时供模型和用户导致确认门、CHECK_*、工具名、内部异常和模型指令进入卡面；直接改原文又会破坏模型续跑和审计。",
+          "impact": "模型result/failureMessage、check明细、preflight与执行状态不变；实时和history按结构化码渲染中英业务摘要，未知检查使用安全兜底。"
+        },
+        {
+          "change": "archive-window永久缺口保留事实但去无效重试并允许发送；unconfirmed保留发送锁、只读对账和重新核对按钮，不新增建对话出口。",
+          "reason": "永久缺口重试不能恢复内容，未确认轮则必须防止重复副作用，两种恢复状态不能共用同一锁发送和重试策略。",
+          "impact": "archive-window不再阻断新提问，unconfirmed核对前仍禁止发送；缺口、日志、只读对账和现有恢复动作保留。"
+        },
+        {
+          "change": "start job页面同步、身份目录和会话发号首次失败后各自动补一次；空目录不重试，最终失败才显示定稿提示。",
+          "reason": "瞬时故障直接打扰用户，但不能用无界重试掩盖持续失败，也不能让旧异步结果写入新身份或新会话。",
+          "impact": "每次入口最多两次真实调用，重试前和写回前复用session/run/epoch及身份守卫；作业已启动事实不改成失败，内部reason/异常原文不上屏。"
+        },
+        {
+          "change": "删除已审定重复通知并同步中英定稿文案；实时done cancelled和AI_RUN_CANCELLED error仅在userStopped非false时写stopped。",
+          "reason": "卡片已有终态或横幅已有同义提示时顶部通知重复，HITL拒绝/放弃还会被实时cancelled误标主动停止。",
+          "impact": "本页和跨页签主动停止仍显示已停止，HITL拒绝/放弃在实时、history和刷新均不显示已停止；非表单、无横幅和其他真实错误提示不丢失。"
+        },
+        {
+          "change": "主控复核返修：HITL只读拒绝不渲染卡体红色原因；workspace明确发布确认取消传专用用户码；start_publish主动停止使用通用RUN_CANCELLED摘要。",
+          "reason": "只读卡头已有已拒绝，红色摘要构成重复；workspace统一MANUAL_ACTION覆盖专用取消文案；后端仅凭工具名和RUN_CANCELLED无法区分发布确认取消与主动停止整轮。",
+          "impact": "普通BACKEND拒绝输出摘要可保留，failed/blocked原因不隐藏；发布确认取消零createJob且中英定稿可见，模型message原文不变；其他workspace失败仍MANUAL_ACTION，ConfirmGate/preflight和实际作业状态不变。"
+        },
+        {
+          "change": "sealAuthoritativeTerminal没有done/error lastFrame时，不再从CANCELLED快照新写host.stopped；已有本地stopped保留。",
+          "reason": "HITL拒绝/放弃只恢复出CANCELLED快照时缺少明确停止来源，terminalUserStopped缺省为主动停止的兼容规则不能跨用到无终帧快照。",
+          "impact": "无frame的HITL拒绝/放弃不误标或写镜像已停止；本地主动stop不丢失；有frame时userStopped=false/true/缺省语义不变，history显式stopped=true恢复、无stopped不复活。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/gate/SpToolCallingManager.java",
+          "status": "checked",
+          "reason": "保留结构化REJECTED/FRONTEND_CANCELLED的userStopped=false及MISSING_ACTION空条件窄豁免；REFERENCES_UNRESOLVED、defCodes/fields解析、预检和确认门不放松。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/history/TranscriptEntries.java",
+          "status": "checked",
+          "reason": "toolCallState在PRECHECK_FAILED时由pending.preflight派生同一组用户摘要参数，并保留target、outcome、code和展示preflight；新增userTextArgs为additive历史投影。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "保留correction双锚点和取消来源透传，并在done extra增加结构化userStopped；实时取消不再要求前端从run CANCELLED猜主动停止。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResumeService.java",
+          "status": "checked",
+          "reason": "结构化HITL决策续跑仍走cancelParkedForDecision，主动停止走原cancelParked，租约、准入和终态语义未改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/SseChatEmitter.java",
+          "status": "checked",
+          "reason": "tool_result把预检失败check白名单投影并入effectiveUserTextArgs，result经ToolResultUserText生成业务摘要，userTextCode与args同帧；模型markModelView仍消费原result。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/StreamViolationException.java",
+          "status": "checked",
+          "reason": "保留boolean userStopped结构化来源及普通取消默认主动停止的兼容构造，无新增可空拆箱或异常原文外发。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/StreamWatchdog.java",
+          "status": "checked",
+          "reason": "段预算起点与attempt静默起点继续分离，首包和事件间超时按本attempt计算，段总预算和阈值不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolResultUserText.java",
+          "status": "checked",
+          "reason": "新增预检check到MISSING_ITEMS/MISSING_UPLOAD/JOB_IN_FLIGHT/CONDITIONS_UNDECIDED/安全兜底的去重投影及中文回退；TASK_EXISTS失败时连带NO_JOB_IN_FLIGHT只落安全兜底，不谎称已有作业。主控返修删除toolName=start_publish+RUN_CANCELLED的无来源特例，主动停止统一返回RUN_CANCELLED；发布确认取消码只由前端明确路径产生。"
+        },
+        {
+          "path": "frontend/src/components/AiPanel/AiPanel.vue",
+          "status": "checked",
+          "reason": "拒绝reason按定稿隐藏，HITL只读拒绝readOnlyReasonText返回空串，不生成ro-reason红条；普通BACKEND工具输出仍可显示定稿摘要，failed/blocked只读原因保留。toolResultText统一消费用户码；预检以业务列表渲染，archive-window去重试，unconfirmed重新核对，AI不可用仅在横幅实际可见时去重。"
+        },
+        {
+          "path": "frontend/src/locales/en-US.json",
+          "status": "checked",
+          "reason": "同步英文拒绝/取消、前端工具、恢复、身份、预检、模型输入截断及导出脏数据词条，不包含内部check、工具名或异常原文。"
+        },
+        {
+          "path": "frontend/src/locales/zh-CN.json",
+          "status": "checked",
+          "reason": "逐项采用批准文件定稿中文，预检统一前缀和五类业务原因完整，保留未执行、未知结局、数据丢失与主动停止事实。"
+        },
+        {
+          "path": "frontend/src/stores/ai.ts",
+          "status": "checked",
+          "reason": "实时done/error及权威封口按userStopped来源写stopped；sealAuthoritativeTerminal仅在lastFrame确为done/error时允许新写，缺lastFrame的CANCELLED快照不猜主动停止，已有host.stopped保留；有frame时false不标、true标、缺省兼容主动停止。通知去重、前端执行投影和恢复重试逻辑不变。"
+        },
+        {
+          "path": "frontend/src/stores/workspace.ts",
+          "status": "checked",
+          "reason": "UiEventResult失败工厂接受可选用户码；仅确认PublishByMode明确返回false的发布确认取消写PUBLISH_CONFIRM_CANCELLED，message仍为用户取消且未启动作业原文，createJob不调用，其他发布失败不带该码。"
+        },
+        {
+          "path": "frontend/src/types/ai.ts",
+          "status": "checked",
+          "reason": "历史toolResponses/toolCallStates增加可选userTextArgs以恢复预检等结构化摘要，未改既有字段类型或必填面。"
+        },
+        {
+          "path": "frontend/src/types/sse.ts",
+          "status": "checked",
+          "reason": "SseDoneFrame/SseErrorFrame增加可选userStopped，旧帧缺省由明确历史/本地停止事实兼容处理，协议为additive。"
+        },
+        {
+          "path": "frontend/src/types/tools.ts",
+          "status": "checked",
+          "reason": "FrontendToolExecution增加仅本地用户投影的可选userTextCode和标量userTextArgs，result仍为POST模型回执，sheetMeta与机器code不变。"
+        },
+        {
+          "path": "frontend/src/types/workspace.ts",
+          "status": "checked",
+          "reason": "UiEventResult增加可选userTextCode，message继续承载模型/工作区原始回执；dispatchUiEvent通过既有result扩展和广播透传，不改handled或事件类型。"
+        },
+        {
+          "path": "frontend/src/utils/ai-dom-tools.ts",
+          "status": "checked",
+          "reason": "高亮带target参数，手改、手动操作、选文件和后果性动作按结构化风险分支给用户码；模型三段式回执、ref、UI_*机器码和零点击安全性质原样保留。"
+        },
+        {
+          "path": "frontend/src/utils/frontend-tools.ts",
+          "status": "checked",
+          "reason": "makeExecution和normalizeExecutorReturn透传用户投影；runWorkspaceAction仅在UiEventResult带结构化码时覆盖MANUAL_ACTION，runUiEventAction同源透传，缺页面能力与执行异常保留定稿码。模型result、outcome、availability、预算不变，不使用中文文本匹配。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "仅修改既有Java/TypeScript类并复用现有异常、beacon和store机制，没有manifest、锁文件、新库或并行时间/状态框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增及触及的Java来源字段、预检投影和短辅助方法均低于50行、圈复杂度20，控制块保留大括号；reason集合使用LinkedHashSet去重并以List.copyOf返回，原始布尔无拆箱风险。前端仅新增可选类型与本地化投影，未新增JSON实体、Lombok相等性或共享可变状态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "内部CANCELLED、预检failureMessage和前端执行result继续保留结构化code及模型指令，不将异常原文返回用户；目录和发号首次失败仅记录安全上下文，连续失败才显示本地化定稿。作业同步不展示内部reason，日志不增加正文、响应体或敏感信息，未知/超时/拒绝均未包装成功。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "用户卡面按定稿显示拒绝、取消、前端操作、恢复和预检业务摘要，中英locale同步；HITL只读拒绝仅留卡头已拒绝，不再重复红色原因，普通failed/blocked原因保留。发布确认取消与主动停止整轮按明确来源使用不同摘要，其他workspace失败仍给手动操作出口；模型回执、真实失败、未执行、未知结局、数据丢失和主动停止状态均保留。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "新增userStopped、userTextArgs及UiEventResult.userTextCode均为additive可选字段，run/pending状态机、终态吸收、preflight和零副作用不变。无lastFrame的CANCELLED快照只封终态不推断stopped，避免误写镜像；有终帧才按明确wire来源处理，已有本地事实不被清除。发布确认取消只在confirmed=false时产码且不createJob，不新增Redis键、数据库访问、线程池或模型并发旁路。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批只调整结构化终态元数据、布尔投影和毫秒锚点，未修改UTF-8解码、SSE分帧、正文、代理对、字素簇或截断处理。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "原三项RED/GREEN与最终单方法复验通过；本轮实时done/error false、跨页签true、本地stop和history拒绝均GREEN，两个MISSING_ACTION空条件、REFERENCES_UNRESOLVED阻断、有效条件成功及第二attempt看门狗GREEN。通知去重、用户投影、恢复条、作业同步、目录/发号、预检纯函数/发射器/真实卡面均按精确测试名单独RED后GREEN，空目录为修改前即PASS的对照。最终Maven -o -DskipTests compile实际编译364源文件成功，vue-tsc --noEmit成功；15个Java/TS/Vue生产文件执行IDEA Reformat后剔除约4.3万行历史格式噪声。IDEA build_project请求超时，未作为成功证据。旧ToolPreflightGateTest#preflightFailureNeverEntersConfirmGateAndEmitsNoCard在新断言前因既有帧序多suspended失败，旧session-purged下一次发送用例得到not-sent；均未改写断言或冒充PASS。主控返修三项分别以真实只读卡ro-reason存在、真实工具链用户码缺失、后端start_publish错误专用摘要取得RED并GREEN；中英AiPanel真实执行结果、failed/blocked原因、普通BACKEND拒绝摘要、history拒绝、实时done false、其他workspace失败均逐点复验通过。追加5个生产文件执行IDEA Reformat并剔除历史格式噪声，最终Maven compile重新编译364源文件成功、vue-tsc成功。无终帧CANCELLED快照单点先因host无stopped被写成true取得RED，最小条件修复后GREEN；同用例验证已有stopped保留，history显式stopped=true、HITL history无stopped、frame false/true/缺省兼容分别单点GREEN。ai.ts再次执行IDEA Reformat并恢复格式噪声，最终vue-tsc成功。未运行类级/批量/循环/全量测试，真实服务、浏览器、Redis、CU和子代理均NOT_RUN。"
+        }
+      }
     }
   ]
 }

@@ -509,6 +509,8 @@ export interface SseDoneFrame extends SseFrameBase {
    */
   context?: ContextUsage
   cancelled?: boolean
+  /** additive：主动停止整轮为 true，HITL 拒绝/放弃当前动作为 false。 */
+  userStopped?: boolean
   attempts?: number
   upstreamEvents?: number
   terminalSignal?: string
@@ -590,6 +592,8 @@ export interface SseErrorFrame extends SseFrameBase {
    * （或 `turn_end=unconfirmed`），不得拿故障码推断"可能成功"。
    */
   unconfirmed?: boolean
+  /** additive 取消来源；仅 AI_RUN_CANCELLED 类终帧使用。 */
+  userStopped?: boolean
 }
 
 /**

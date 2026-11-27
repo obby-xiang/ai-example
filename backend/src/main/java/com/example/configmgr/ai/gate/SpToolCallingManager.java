@@ -736,6 +736,13 @@ public class SpToolCallingManager implements ToolCallingManager {
     /** 只存在于单次 create_entry correction Prompt 的进程内工具上下文。 */
     public static final String TOOL_CONTEXT_CREATE_ENTRY_CORRECTION = "createEntryCorrection";
 
+    /** correction 的结构化来源；缺失时按 references-unresolved 严格校验。 */
+    public static final String TOOL_CONTEXT_CREATE_ENTRY_CORRECTION_MODE = "createEntryCorrectionMode";
+
+    public static final String CREATE_ENTRY_CORRECTION_MISSING_ACTION = "missing-action";
+
+    public static final String CREATE_ENTRY_CORRECTION_REFERENCES_UNRESOLVED = "references-unresolved";
+
     /**
      * 本轮正文、推理与人工等待 park 的<b>分段捕获器</b>（进程内、随 run 的请求对象走，不落全局表）。
      *
@@ -1059,12 +1066,14 @@ public class SpToolCallingManager implements ToolCallingManager {
         }
     }
 
+    /** MISSING_ACTION 允许宿主后续收集空条件；REFERENCES_UNRESOLVED 仍要求完整非空条件。 */
     private void prepareCorrectedCreateTaskBatch(ToolBatchState state, List<PendingToolCall> pendings,
             Map<String, CreateTaskReferenceResolver.Resolution> createTaskResolutions) {
         PendingToolCall candidate = pendings.getFirst();
         CreateTaskReferenceResolver.Resolution resolution = createTaskResolutions.get(candidate.getToolCallId());
         if (pendings.size() == 1 && isResolvedCreateTask(candidate, resolution)
-                && !this.createTaskReferenceResolver.hasEmptyConditions(candidate.getArguments())) {
+                && (!this.createTaskReferenceResolver.hasEmptyConditions(candidate.getArguments())
+                || isMissingActionCorrection(state.prompt))) {
             preparePending(state, candidate, 1, resolution);
             return;
         }
@@ -1093,6 +1102,12 @@ public class SpToolCallingManager implements ToolCallingManager {
     private boolean isCreateEntryCorrection(Prompt prompt) {
         Map<String, Object> toolContext = toolContextOf(prompt);
         return toolContext != null && Boolean.TRUE.equals(toolContext.get(TOOL_CONTEXT_CREATE_ENTRY_CORRECTION));
+    }
+
+    private boolean isMissingActionCorrection(Prompt prompt) {
+        Map<String, Object> toolContext = toolContextOf(prompt);
+        return toolContext != null && CREATE_ENTRY_CORRECTION_MISSING_ACTION.equals(
+                toolContext.get(TOOL_CONTEXT_CREATE_ENTRY_CORRECTION_MODE));
     }
 
     private void preparePending(ToolBatchState state, PendingToolCall pending, int batchSize,
@@ -2940,7 +2955,7 @@ public class SpToolCallingManager implements ToolCallingManager {
         if (PendingToolCall.FRONTEND_CANCELLED.equals(resolved.getStatus())
                 || PendingToolCall.REJECTED.equals(resolved.getStatus())) {
             throw new StreamViolationException(StreamViolationException.CANCELLED,
-                    "User decision received; closing this turn as cancelled");
+                    "User decision received; closing this turn as cancelled", false);
         }
     }
 

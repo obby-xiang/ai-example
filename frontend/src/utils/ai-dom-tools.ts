@@ -99,6 +99,9 @@ export interface UiToolOutcome {
   outcome: FrontendToolOutcome
   availability: 'available' | 'degraded' | 'unavailable'
   result: string
+  /** 卡面用户摘要；缺省时沿用 result。模型回执始终使用 result。 */
+  userTextCode?: string
+  userTextArgs?: Record<string, string | number>
   /** 机器码（UI_* 闭集；只在前后端/台账流动，不进用户可见文案）。 */
   code?: string
 }
@@ -1588,6 +1591,14 @@ function consequentialText(ref: string): string {
   return `${head}请改用注册动作 ${target.name}（它会进确认门，由用户确认后才执行）。`
 }
 
+function consequentialOutcome(ref: string): UiToolOutcome {
+  const target = suggestActionFor(ref)
+  const userTextCode = target === null
+    ? 'MANUAL_ACTION'
+    : target.kind === 'handoff' ? 'MANUAL_FILE_PICK' : 'CONSEQUENTIAL_ACTION'
+  return { ...fail(consequentialText(ref)), userTextCode }
+}
+
 /** `ui_click`：区域 → 上下文 → 元素 → 风险四段链；consequential **零点击**。 */
 export async function aiClick(
   args: Record<string, unknown> = {},
@@ -1602,7 +1613,7 @@ export async function aiClick(
 
   if (initial.risk === 'consequential') {
     // 安全性质：一次不点。这里绝不调用 el.click()。
-    return fail(consequentialText(ref))
+    return consequentialOutcome(ref)
   }
 
   const slot = await acquireWriteSlot()
@@ -1615,7 +1626,7 @@ export async function aiClick(
   }
   const { hit, label, risk } = fenced
   if (risk === 'consequential') {
-    return fail(consequentialText(ref))
+    return consequentialOutcome(ref)
   }
   onBrowserSideEffect?.()
   highlightElement(hit.el, label)
@@ -1672,17 +1683,20 @@ function checkWritePrecondition(
   }
   return {
     ok: false,
-    outcome: fail(
-      formatUiReceipt({
-        tool: '界面写入',
-        conclusion: '未写入（前置条件已变）',
-        reason: '该控件在你上次写入后被用户手动改过，继续写入会覆盖用户的修改',
-        next: '重新 ui_snapshot 并核对当前值；如需覆盖，请先征得用户确认'
-      }) + ` ref=${ref}`,
-      'degraded',
-      'UI_PRECONDITION_CHANGED',
-      'rejected'
-    )
+    outcome: {
+      ...fail(
+        formatUiReceipt({
+          tool: '界面写入',
+          conclusion: '未写入（前置条件已变）',
+          reason: '该控件在你上次写入后被用户手动改过，继续写入会覆盖用户的修改',
+          next: '重新 ui_snapshot 并核对当前值；如需覆盖，请先征得用户确认'
+        }) + ` ref=${ref}`,
+        'degraded',
+        'UI_PRECONDITION_CHANGED',
+        'rejected'
+      ),
+      userTextCode: 'UI_PRECONDITION_CHANGED'
+    }
   }
 }
 
@@ -1985,7 +1999,11 @@ export function aiHighlight(args: Record<string, unknown> = {}): UiToolOutcome {
   }
   const { hit, label } = fenced
   highlightElement(hit.el, label, note ?? undefined)
-  return ok(`已高亮「${label}」，请用户在左侧工作区查看。`)
+  return {
+    ...ok(`已高亮「${label}」，请用户在左侧工作区查看。`),
+    userTextCode: 'UI_HIGHLIGHTED',
+    userTextArgs: { target: label }
+  }
 }
 
 // ── 高亮（三重冗余） ─────────────────────────────────────────────────────────

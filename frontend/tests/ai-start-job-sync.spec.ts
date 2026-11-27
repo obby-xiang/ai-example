@@ -273,7 +273,7 @@ describe('批次 5B · start_publish 同步 / 失败回执可见 / AR-08 事件�
     expect(handler).toHaveBeenCalledWith(expect.objectContaining({ taskId: 7, jobId: 41 }))
   })
 
-  it('handler 返回 { ok:false, reason } ⇒ 面板通知可见（不静默）', async () => {
+  it('页面同步连续失败 ⇒ 自动重试一次后显示定稿，不展示内部 reason', async () => {
     const handler = vi.fn().mockResolvedValue({ ok: false, reason: '未同步：该作业属于任务 #99，当前导入向导绑定的是任务 #7' })
     registerPageHandler('import.syncJob', handler)
     const store = useAiStore()
@@ -283,12 +283,13 @@ describe('批次 5B · start_publish 同步 / 失败回执可见 / AR-08 事件�
     feedJobFrames(store, 'start_publish', '发布作业已启动（作业 #41），正在将数据写入正式库…')
     await flushPromises()
 
-    expect(store.notice).toContain('作业 #41')
-    expect(store.notice).toContain('未能同步')
+    expect(handler).toHaveBeenCalledTimes(2)
+    expect(store.notice).toBe('作业已启动，可重新打开任务查看进度。')
+    expect(store.notice).not.toContain('任务 #99')
     expect(store.noticeSeverity).toBe('warning')
   })
 
-  it('handler 抛错 ⇒ 同样落可见通知（不再 .catch(() => undefined)）', async () => {
+  it('页面同步连续抛错 ⇒ 重试一次后显示定稿，不展示异常原文', async () => {
     const handler = vi.fn().mockRejectedValue(new Error('页面已卸载'))
     registerPageHandler('export.syncJob', handler)
     const store = useAiStore()
@@ -297,7 +298,9 @@ describe('批次 5B · start_publish 同步 / 失败回执可见 / AR-08 事件�
     feedJobFrames(store, 'start_export', '导出作业已启动（作业 #12），请稍后查看进度')
     await flushPromises()
 
-    expect(store.notice).toContain('页面已卸载')
+    expect(handler).toHaveBeenCalledTimes(2)
+    expect(store.notice).toBe('作业已启动，可重新打开任务查看进度。')
+    expect(store.notice).not.toContain('页面已卸载')
     expect(store.noticeSeverity).toBe('warning')
   })
 
@@ -310,5 +313,38 @@ describe('批次 5B · start_publish 同步 / 失败回执可见 / AR-08 事件�
     await flushPromises()
 
     expect(notify).toHaveBeenCalledWith('start_export')
+  })
+})
+
+
+describe('定稿：作业页面同步一次有界自动重试', () => {
+  it('首次失败、第二次成功后静默收口', async () => {
+    const handler = vi.fn()
+      .mockResolvedValueOnce({ ok: false, reason: 'internal detail' })
+      .mockResolvedValueOnce('ok')
+    registerPageHandler('export.syncJob', handler)
+    const store = useAiStore()
+    store.messages = [streamingMessage()]
+    feedJobFrames(store, 'start_export', '导出作业已启动（作业 #12），请稍后查看进度')
+    await flushPromises()
+    expect(handler).toHaveBeenCalledTimes(2)
+    expect(store.notice).toBeNull()
+  })
+
+  it('换会话后旧失败不再重试，也不写入新会话通知', async () => {
+    let rejectFirst: ((error: Error) => void) | null = null
+    const handler = vi.fn().mockImplementation(() => new Promise((_resolve, reject) => {
+      rejectFirst = reject
+    }))
+    registerPageHandler('export.syncJob', handler)
+    const store = useAiStore()
+    store.messages = [streamingMessage()]
+    feedJobFrames(store, 'start_export', '导出作业已启动（作业 #12），请稍后查看进度')
+    await flushPromises()
+    store.adoptFreshSession()
+    ;(rejectFirst as unknown as (error: Error) => void)(new Error('stale failure'))
+    await flushPromises()
+    expect(handler).toHaveBeenCalledTimes(1)
+    expect(store.notice).toBeNull()
   })
 })

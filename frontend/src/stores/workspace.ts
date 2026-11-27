@@ -658,8 +658,8 @@ function ok(message: string): UiEventResult {
   return { handled: true, message }
 }
 
-function fail(message: string): UiEventResult {
-  return { handled: false, message }
+function fail(message: string, userTextCode?: string): UiEventResult {
+  return { handled: false, message, ...(userTextCode ? { userTextCode } : {}) }
 }
 
 /**
@@ -922,7 +922,7 @@ async function runUiEvent(event: UiEvent, lifetime?: UiEventLifetime): Promise<U
           }
           const confirmed = await confirmPublishByMode(resolution.mode)
           if (!confirmed) {
-            return fail('用户取消了发布确认，未启动发布作业')
+            return fail('用户取消了发布确认，未启动发布作业', 'PUBLISH_CONFIRM_CANCELLED')
           }
         }
         const job = await jobsApi.createJob(event.taskId, event.jobType)

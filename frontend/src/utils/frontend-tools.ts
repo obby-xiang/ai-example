@@ -173,6 +173,8 @@ export function makeExecution(input: {
   reason?: string
   code?: string
   sheetMeta?: FrontendToolExecution['sheetMeta']
+  userTextCode?: string
+  userTextArgs?: Record<string, string | number>
 }): FrontendToolExecution {
   const execution: FrontendToolExecution = {
     availability: input.availability,
@@ -188,6 +190,12 @@ export function makeExecution(input: {
   }
   if (input.sheetMeta !== undefined) {
     execution.sheetMeta = input.sheetMeta
+  }
+  if (input.userTextCode !== undefined) {
+    execution.userTextCode = input.userTextCode
+  }
+  if (input.userTextArgs !== undefined) {
+    execution.userTextArgs = input.userTextArgs
   }
   return execution
 }
@@ -1568,7 +1576,8 @@ async function runWorkspaceAction(
   return makeExecution({
     outcome: 'failed',
     availability: 'degraded',
-    result: `${action.displayName}未完成（${outcome.message}）。请提示用户在界面上手动完成该动作。`
+    result: `${action.displayName}未完成（${outcome.message}）。请提示用户在界面上手动完成该动作。`,
+    userTextCode: outcome.userTextCode ?? 'MANUAL_ACTION'
   })
 }
 
@@ -1784,7 +1793,8 @@ async function runRegisteredTool(
     return makeExecution({
       outcome: 'failed',
       availability: 'degraded',
-      result: `${descriptor.displayName}当前不可用（本页未注册该能力）。请改用其他方式：由用户手动操作，或使用后端工具完成任务。`
+      result: `${descriptor.displayName}当前不可用（本页未注册该能力）。请改用其他方式：由用户手动操作，或使用后端工具完成任务。`,
+      userTextCode: 'MANUAL_ACTION'
     })
   }
 
@@ -1797,7 +1807,8 @@ async function runRegisteredTool(
     return makeExecution({
       outcome: 'failed',
       availability: 'degraded',
-      result: `${descriptor.displayName}执行失败：${error instanceof Error ? error.message : String(error)}。请提示用户手动重试。`
+      result: `${descriptor.displayName}执行失败：${error instanceof Error ? error.message : String(error)}。请提示用户手动重试。`,
+      userTextCode: 'FRONTEND_EXECUTOR_FAILED'
     })
   }
 }
@@ -1821,7 +1832,9 @@ function normalizeExecutorReturn(value: string | FrontendToolExecution): Fronten
     code: value.code,
     // 表格采样元数据必须穿过这一层：本函数是执行器返回值的**重新包装**点，
     // 丢了它 = 后端永远收不到采样事实（日志/台账/计数三面同时失明）
-    sheetMeta: value.sheetMeta
+    sheetMeta: value.sheetMeta,
+    userTextCode: value.userTextCode,
+    userTextArgs: value.userTextArgs
   })
 }
 
@@ -1905,7 +1918,12 @@ async function runUiEventAction(
     // 批3③a D1：handled:true 且副作用已 await ⇒ 'ok'；契约层未受理（fail）⇒ 确定性 'failed'
     // —— 不再让"未受理"戴着 ok:true 出去。
     if (!outcome.handled) {
-      return makeExecution({ outcome: 'failed', availability: 'available', result: outcome.message })
+      return makeExecution({
+        outcome: 'failed',
+        availability: 'available',
+        result: outcome.message,
+        userTextCode: outcome.userTextCode
+      })
     }
     // 批次 5B：导航类事件等目标页就绪再回灌（等待上界与 navigate_to 同源）
     const wait = await waitForUiEventNavigation(event)
@@ -2133,7 +2151,8 @@ async function runUiPrimitive(
       outcome = {
         outcome: 'failed',
         availability: 'degraded',
-        result: '上传交接不走通用执行器：请在对话内的交接卡上由用户手势选择文件（本次未执行）。'
+        result: '上传交接不走通用执行器：请在对话内的交接卡上由用户手势选择文件（本次未执行）。',
+        userTextCode: 'MANUAL_FILE_PICK'
       }
       break
     default:
@@ -2147,7 +2166,9 @@ async function runUiPrimitive(
     outcome: outcome.outcome,
     availability: outcome.availability,
     result: outcome.result,
-    code: outcome.code
+    code: outcome.code,
+    userTextCode: outcome.userTextCode,
+    userTextArgs: outcome.userTextArgs
   })
 }
 
@@ -2164,7 +2185,12 @@ function defaultExecutor(name: FrontendToolName): FrontendToolExecutor | null {
     return async (call, lifetime) => {
       const handler = getPageHandler(PAGE_HANDLER_OPEN_EXPORT_EDITOR)
       if (!handler) {
-        throw new Error('The export wizard did not register the online editor capability')
+        return makeExecution({
+          outcome: 'failed',
+          availability: 'degraded',
+          result: '打开导出文件在线编辑器当前不可用（本页未注册该能力）。请改用其他方式，或由用户手动操作。',
+          userTextCode: 'MANUAL_ACTION'
+        })
       }
       // 页面 handler 同样拿得到存活标记（打开编辑器前的 await 链可能跨过预算/停止）
       const outcome = await handler({ taskId: call.args.taskId, defCode: call.args.defCode }, lifetime)

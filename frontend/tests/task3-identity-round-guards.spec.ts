@@ -240,7 +240,7 @@ describe('Task 3 · 异步回包的轮次与身份守卫', () => {
 })
 
 describe('Task 3 · 发号与停止的落地归属', () => {
-  it('发号重试成功（复制页签）：统一补所有权认领，本页签拿到新会话的锁', async () => {
+  it('发号自动重试成功（复制页签）：统一补所有权认领，本页签拿到新会话的锁', async () => {
     const locks = new FakeLockManager()
     Object.defineProperty(navigator, 'locks', { value: locks, configurable: true })
     // 原页签持着继承来的会话锁 ⇒ 本页签被判为复制品，随后自行发号。
@@ -253,13 +253,8 @@ describe('Task 3 · 发号与停止的落地归属', () => {
     const store = useAiStore()
     await store.ensureTabOwnership()
     await flushPromises()
-    expect(store.tabOwnership).toBe('duplicate')
-    expect(store.sessionId).toBe('')
-    expect(store.sessionIssueFailed).toBe(true)
-
-    // 横幅重试：发号成功 ⇒ 必须补上所有权认领（不能停在 duplicate / 无锁）。
-    await store.retryIdentitySession()
     expect(store.sessionId).toBe('9001')
+    expect(store.sessionIssueFailed).toBe(false)
     expect(store.tabOwnership).toBe('owner')
     expect(heldSessionLockName()).toBe(sessionLockName('9001', OLD))
     expect(locks.isHeld(sessionLockName('9001', OLD))).toBe(true)
@@ -522,5 +517,94 @@ describe('Task 3 · 归档裁剪只认后端明确状态', () => {
     expect(info.terminal).toBe(true)
     expect(onArchiveTrim).toHaveBeenCalledTimes(1)
     expect(onArchiveTrim).toHaveBeenCalledWith({ fromSeq: 6, toSeq: 8 })
+  })
+})
+
+
+describe('定稿：表单卡内错误与顶部通知去重', () => {
+  it('表单提交失败只写卡内错误，非表单路径仍保留顶部错误出口', async () => {
+    const store = useAiStore()
+    await store.loadTenantDirectory()
+    store.activeForm = {
+      toolCallId: 'gf-submit-copy', runId: 'run-old', form: { fields: [] } as never,
+      status: 'filling', error: null, values: {}, fieldErrors: []
+    }
+    api.frontendToolResult.mockRejectedValue(new Error('internal form detail'))
+
+    await store.submitGenerativeForm({})
+
+    expect(store.activeForm?.status).toBe('filling')
+    expect(store.activeForm?.error).toContain('表单提交未完成')
+    expect(store.noticeCode).toBeNull()
+
+    store.activeForm = null
+    const outcome = await store.submitFrontendToolResult('non-form-copy', '{}', 'http-post', false, 'run-old')
+    expect(outcome.ok).toBe(false)
+    expect(store.noticeCode).toBe('ai.notice.toolSubmitFailed')
+  })
+})
+
+
+describe('定稿：目录与发号一次有界自动恢复', () => {
+  it('目录首次失败自动补一次，成功后不显示失败横幅', async () => {
+    api.tenantUsers.mockReset()
+    api.tenantUsers.mockRejectedValueOnce(new Error('temporary')).mockResolvedValueOnce(DIRECTORY)
+    const store = useAiStore()
+    await store.loadTenantDirectory()
+    expect(api.tenantUsers).toHaveBeenCalledTimes(2)
+    expect(store.directoryStatus).toBe('ready')
+    expect(store.directoryError).toBeNull()
+  })
+
+  it('空目录不自动重试，直接显示联系管理员', async () => {
+    api.tenantUsers.mockResolvedValue([])
+    const store = useAiStore()
+    await store.loadTenantDirectory()
+    expect(api.tenantUsers).toHaveBeenCalledTimes(1)
+    expect(store.directoryStatus).toBe('unavailable')
+    expect(store.directoryError).toBe('当前没有可用的用户身份，请联系管理员。')
+  })
+
+  it('发号首次失败自动补一次，第二次成功后直接恢复', async () => {
+    api.createSession.mockReset()
+    api.createSession.mockRejectedValueOnce(new Error('temporary')).mockResolvedValueOnce('9001')
+    const store = useAiStore()
+    store.sessionId = ''
+    store.identity = OLD
+    store.tabOwnership = 'owner'
+    vi.spyOn(store, 'claimSessionOwnership').mockResolvedValue(undefined)
+    await expect(store.ensureSession()).resolves.toBe('9001')
+    expect(api.createSession).toHaveBeenCalledTimes(2)
+    expect(store.sessionIssueFailed).toBe(false)
+    expect(store.notice).toBeNull()
+  })
+
+  it('发号连续失败只尝试两次，最终才显示定稿', async () => {
+    api.createSession.mockRejectedValue(new Error('still down'))
+    const store = useAiStore()
+    store.sessionId = ''
+    store.identity = OLD
+    await expect(store.ensureSession()).resolves.toBe('')
+    expect(api.createSession).toHaveBeenCalledTimes(2)
+    expect(store.sessionIssueFailed).toBe(true)
+    expect(store.notice).toBe('对话暂时无法开始，请重试。')
+  })
+
+  it('换会话后旧发号重试结果不得写入新现场', async () => {
+    let resolveSecond: ((value: string) => void) | null = null
+    api.createSession.mockReset()
+    api.createSession.mockRejectedValueOnce(new Error('temporary')).mockImplementationOnce(
+      () => new Promise<string>((resolve) => { resolveSecond = resolve })
+    )
+    const store = useAiStore()
+    store.sessionId = ''
+    store.identity = OLD
+    const pending = store.ensureSession()
+    await vi.waitFor(() => expect(api.createSession).toHaveBeenCalledTimes(2))
+    store.adoptFreshSession()
+    ;(resolveSecond as unknown as (value: string) => void)('stale-session')
+    await expect(pending).resolves.toBe('')
+    expect(store.sessionId).not.toBe('stale-session')
+    expect(store.sessionIssueFailed).toBe(false)
   })
 })

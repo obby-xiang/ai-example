@@ -3188,16 +3188,21 @@ public class SseChatEmitter {
             frame.put("target", target);
         }
         frame.put("messageId", toolMessageId(pending));
-        Map<String, Object> displayArgs = new LinkedHashMap<>(target);
-        if (MapUtils.isNotEmpty(userTextArgs)) {
-            displayArgs.putAll(userTextArgs);
+        Map<String, Object> effectiveUserTextArgs = new LinkedHashMap<>();
+        if (ErrorCodes.PRECHECK_FAILED.equals(code)) {
+            effectiveUserTextArgs.putAll(ToolResultUserText.preflightUserTextArgs(pending.getPreflight()));
         }
+        if (MapUtils.isNotEmpty(userTextArgs)) {
+            effectiveUserTextArgs.putAll(userTextArgs);
+        }
+        Map<String, Object> displayArgs = new LinkedHashMap<>(target);
+        displayArgs.putAll(effectiveUserTextArgs);
         // N9/S9：{@code result} 保留中文用户摘要回退，{@code userTextCode} 供前端本地化；
         // 创建任务只读结构化任务号与 openWizard，不反解模型原文。
         frame.put("result", ToolResultUserText.forUser(pending.getName(), code, result, displayArgs));
         frame.put("userTextCode", ToolResultUserText.userTextCode(pending.getName(), code, displayArgs));
-        if (MapUtils.isNotEmpty(userTextArgs)) {
-            frame.put("userTextArgs", userTextArgs);
+        if (MapUtils.isNotEmpty(effectiveUserTextArgs)) {
+            frame.put("userTextArgs", effectiveUserTextArgs);
         }
         if (resultView != null) {
             frame.put("resultView", resultView.toMap());

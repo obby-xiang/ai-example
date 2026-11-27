@@ -45,6 +45,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -853,6 +854,30 @@ class EmptyReplyTerminalTest {
 		RunSnapshot snapshot = this.store.get(RUN_ID);
 		assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.DONE);
 		assertThat(snapshot.getFinalText()).isEqualTo("第二次答出来了");
+	}
+
+	/** 第一 attempt 已超过首包阈值但未耗尽段预算；第二 attempt 仍须拥有自己的完整首包窗口。 */
+	@Test
+	void emptyReplyRetryAnchorsFirstByteTimeoutToSecondAttempt() {
+		this.properties.getResilience().setFirstByteTimeout(java.time.Duration.ofSeconds(2));
+		this.properties.getResilience().setInterEventTimeout(java.time.Duration.ofHours(1));
+		this.properties.getResilience().setTotalBudget(java.time.Duration.ofSeconds(8));
+		AtomicLong secondAttemptStartedAt = new AtomicLong();
+		Flux<ChatResponse> firstAttempt = Flux.concat(
+				Flux.just(reasoning("隐藏推理")),
+				Flux.just(terminal("stop")).delaySubscription(java.time.Duration.ofMillis(2200L)));
+		when(this.chatModel.stream(any(Prompt.class))).thenReturn(firstAttempt, Flux.defer(() -> {
+			secondAttemptStartedAt.set(System.currentTimeMillis());
+			return Flux.<ChatResponse>never();
+		}));
+
+		FrameWire wire = runTurn();
+
+		long secondAttemptMs = System.currentTimeMillis() - secondAttemptStartedAt.get();
+		Map<String, Object> error = FrameContract.oneOfType(clientView(wire), "error");
+		assertThat(error).containsEntry("code", StreamViolationException.FIRST_BYTE_TIMEOUT);
+		assertThat(secondAttemptMs).as("第二 attempt 必须先用自己的 2s 首包窗口，不能继承第一 attempt 的静默")
+				.isGreaterThanOrEqualTo(1500L);
 	}
 
 	/**

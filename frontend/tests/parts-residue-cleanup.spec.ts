@@ -206,11 +206,11 @@ describe('施工项1：requiresAction 六残留点写段收口', () => {
     expect(api.confirm).toHaveBeenCalledTimes(1)
     expect(api.confirm.mock.calls[0]![0].toolCallId).toBe('c1')
 
-    // 非法身份：不存在的 id / 已决段 —— 提示并 return，不调用 API
+    // 非法身份：不存在的 id / 已决段静默 return；已收敛卡片保留，不调用 API
     api.confirm.mockClear()
     await store.confirm(true, undefined, 'nope')
     expect(api.confirm).not.toHaveBeenCalled()
-    expect(store.notice).toBe('没有待处理的确认请求')
+    expect(store.noticeCode).toBeNull()
     expect(toolPartsOf(assistant).find((part) => part.toolCallId === 'c2')).toMatchObject({ status: 'pending', requiresAction: true })
   })
 
@@ -237,11 +237,13 @@ describe('施工项1：requiresAction 六残留点写段收口', () => {
       expect(soleToolPart(assistant).decision).toBeUndefined()
       // ② 提交态 = syncing（面板显示「已提交，同步中…」且双按钮禁用）
       expect(store.gateSubmissionOf('c1')).toMatchObject({ decision: 'approved', syncing: true })
+      expect(store.noticeCode).toBeNull()
       // ③ 同 toolCallId 再点被源头防重短路（同一条最多提交一次）
       api.confirm.mockResolvedValue({})
       await store.confirm(true)
       expect(api.confirm).toHaveBeenCalledTimes(1)
       expect(api.runsCurrent).not.toHaveBeenCalled()
+      expect(store.noticeCode).toBeNull()
 
       // ④ 3s 未达结局帧 ⇒ 拉 runs/current 校正为**真实裁决**（后端说 REJECTED，不是 approved）
       await vi.advanceTimersByTimeAsync(3000)

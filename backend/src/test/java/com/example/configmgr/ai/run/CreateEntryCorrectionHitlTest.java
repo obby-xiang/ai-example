@@ -47,6 +47,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
@@ -448,6 +449,23 @@ class CreateEntryCorrectionHitlTest {
     }
 
     @Test
+    void referencesUnresolvedCorrectionWithEmptyConditionsStillFailsClosed() throws Exception {
+        useRealChatClient();
+        useEmptyEvidence();
+        unresolvedThenCorrected(AiToolNames.CREATE_TASK,
+                "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[],\"conditions\":{}}");
+
+        chat();
+
+        assertFailedWithoutFollowUp();
+        assertOriginalUnresolved();
+        PendingToolCall corrected = this.store.pending(RUN_ID, CORRECTED_CALL_ID);
+        assertThat(corrected.getStatus()).isEqualTo(PendingToolCall.PRECHECK_FAILED);
+        assertThat(corrected.getCode()).isEqualTo(CreateTaskReferenceResolver.FAILED_CODE);
+        assertTemporaryMarkerAbsent(this.store.get(RUN_ID));
+    }
+
+    @Test
     void correctedResolutionFailureReturnsDirectWithoutNextHopOrVisibleToolJson() throws Exception {
         this.properties.getResilience().setTotalBudget(java.time.Duration.ofSeconds(2));
         useRealChatClient();
@@ -716,7 +734,53 @@ class CreateEntryCorrectionHitlTest {
         verifyNoInteractions(this.jobService);
         assertThat(this.store.ledger(RUN_ID)).noneMatch(record -> AiToolNames.CREATE_TASK.equals(record.get("name"))
                 && Boolean.TRUE.equals(record.get("executed")));
+        List<Message> settledHistory = this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson());
+        assertThat(settledHistory).filteredOn(AssistantMessage.class::isInstance)
+                .map(AssistantMessage.class::cast)
+                .allSatisfy(assistant -> assertThat(assistant.getMetadata())
+                        .doesNotContainEntry(ResilientChatService.STOPPED_KEY, true));
+        assertThat(settledHistory).anyMatch(message -> message instanceof ToolResponseMessage responses
+                && responses.getResponses().stream().anyMatch(response -> CORRECTED_CALL_ID.equals(response.id())));
         assertTemporaryMarkerAbsent(this.store.get(RUN_ID));
+        List<Map<String, Object>> frames = FrameWire.normalize(this.store.events(RUN_ID));
+        assertThat(frames).filteredOn(frame -> "done".equals(frame.get("type"))).singleElement()
+                .satisfies(frame -> assertThat(frame).containsEntry("userStopped", false));
+    }
+
+    @Test
+    void inlineRejectedCreateTaskDoesNotMarkAssistantStopped() throws Exception {
+        this.properties.getPark().setEnabled(false);
+        useRealChatClient();
+        when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
+                .thenReturn(Flux.just(toolCallChunk(CALL_ID, AiToolNames.CREATE_TASK, ARGUMENTS)));
+        FrameWire wire;
+        try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+                com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
+            wire = FrameWire.attachTo(this.registry.of(RUN_ID));
+        }
+        ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "inline-reject-stopped-test");
+            thread.setDaemon(true);
+            return thread;
+        });
+        try {
+            Future<?> driving = executor.submit(() -> chat());
+            wire.awaitType("confirm_request", 5000L);
+            assertThat(submitDecision(RUN_ID, CALL_ID, false).outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+            driving.get(10, TimeUnit.SECONDS);
+
+            assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+            assertThat(this.store.pending(RUN_ID, CALL_ID).getStatus()).isEqualTo(PendingToolCall.REJECTED);
+            List<Message> settledHistory = this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson());
+            assertThat(settledHistory).filteredOn(AssistantMessage.class::isInstance)
+                    .map(AssistantMessage.class::cast)
+                    .allSatisfy(assistant -> assertThat(assistant.getMetadata())
+                            .doesNotContainEntry(ResilientChatService.STOPPED_KEY, true));
+            verifyNoInteractions(this.taskService);
+            verifyNoInteractions(this.jobService);
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -741,6 +805,34 @@ class CreateEntryCorrectionHitlTest {
         org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
                 .chatCompletionStream(any(ChatCompletionRequest.class), any());
         assertTemporaryMarkerAbsent(this.store.get(RUN_ID));
+    }
+
+    @Test
+    void missingActionWithEmptyDefinitionsAndConditionsParksForConfirmation() {
+        useRealChatClient();
+        useEmptyEvidence();
+        plainStopThenCorrectedCreateTask(
+                "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[],\"conditions\":{}}");
+
+        chat();
+
+        assertPlainStopCorrectionParked();
+        assertThat(this.store.pending(RUN_ID, CORRECTED_CALL_ID).getArguments())
+                .contains("\"defCodes\":[]").contains("\"conditions\":{}");
+    }
+
+    @Test
+    void missingActionWithKnownDefinitionsAndEmptyConditionsParksForConfirmation() {
+        useRealChatClient();
+        useEmptyEvidence();
+        plainStopThenCorrectedCreateTask(
+                "{\"type\":\"EXPORT\",\"title\":\"raw title\",\"defCodes\":[\"CURRENCY\"],\"conditions\":{}}");
+
+        chat();
+
+        assertPlainStopCorrectionParked();
+        assertThat(this.store.pending(RUN_ID, CORRECTED_CALL_ID).getArguments())
+                .contains("\"defCodes\":[\"CURRENCY\"]").contains("\"conditions\":{}");
     }
 
     @Test
@@ -1079,9 +1171,13 @@ class CreateEntryCorrectionHitlTest {
     }
 
     private void plainStopThenCorrectedCreateTask() {
+        plainStopThenCorrectedCreateTask(ARGUMENTS);
+    }
+
+    private void plainStopThenCorrectedCreateTask(String arguments) {
         when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
                 .thenReturn(Flux.just(textChunk("首次纯文本")),
-                        Flux.just(toolCallChunk(CORRECTED_CALL_ID, AiToolNames.CREATE_TASK, ARGUMENTS)));
+                        Flux.just(toolCallChunk(CORRECTED_CALL_ID, AiToolNames.CREATE_TASK, arguments)));
     }
 
     private void assertPlainStopCorrectionParked() {

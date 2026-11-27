@@ -226,6 +226,31 @@ class SseChatEmitterFramesTest {
     }
 
     @Test
+    void preflightFailureCarriesBusinessUserSummaryAndPreservesModelEnvelopeInput() {
+        PendingToolCall pending = pending("call-preflight-copy");
+        pending.setStatus(PendingToolCall.PRECHECK_FAILED);
+        pending.setOutcome(ToolOutcome.FAILED.wire());
+        pending.setCode(ToolOutcome.CODE_PRECHECK_FAILED);
+        pending.setPreflight(Map.of("checks", List.of(
+                Map.of("code", "HAS_ITEMS", "pass", false),
+                Map.of("code", "HAS_UPLOAD", "pass", false),
+                Map.of("code", "NO_JOB_IN_FLIGHT", "pass", false),
+                Map.of("code", "UNKNOWN_CHECK", "pass", false))));
+        String modelText = "PRECHECK_FAILED: HAS_ITEMS / HAS_UPLOAD / start_import / confirm gate";
+
+        this.emitter.toolResult(pending, false, false, modelText);
+
+        Map<String, Object> frame = archivedFrames().getFirst();
+        assertThat(String.valueOf(frame.get("result"))).startsWith("本次操作未执行，请先完成以下准备：")
+                .contains("尚未选择配置项", "尚未上传数据文件", "已有作业正在执行", "当前操作的前置条件尚未满足")
+                .doesNotContain("HAS_ITEMS", "start_import", "confirm gate");
+        assertThat(frame).containsEntry("userTextCode", "PRECHECK_FAILED")
+                .containsEntry("userTextArgs", Map.of("reasons", List.of("MISSING_ITEMS", "MISSING_UPLOAD",
+                        "JOB_IN_FLIGHT", "PREPARATION_REQUIRED")));
+        assertThat(modelText).isEqualTo("PRECHECK_FAILED: HAS_ITEMS / HAS_UPLOAD / start_import / confirm gate");
+    }
+
+    @Test
     void toolResultFrameCarriesOutcomeFieldsEvenUnderNonNullMapper() throws Exception {
         // 本用例注入一个 NON_NULL 的 ObjectMapper，验证帧装配器不依赖"全局 inclusion 恰好是 ALWAYS"：
         // 若把本类构造函数里的 copy().setSerializationInclusion(ALWAYS) 去掉，code/target 为 null 时

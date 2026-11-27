@@ -8,6 +8,8 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { mount } from '@vue/test-utils'
+import { applyLocale } from '@/locales'
 
 const confirmApi = vi.hoisted(() => ({ confirmPublishByMode: vi.fn() }))
 const api = vi.hoisted(() => ({
@@ -25,6 +27,18 @@ const taskStore = vi.hoisted(() => ({
   cancelJob: vi.fn(),
   resolveWizardRoute: vi.fn()
 }))
+const aiPanelApi = vi.hoisted(() => ({
+  health: vi.fn(),
+  history: vi.fn(),
+  runsCurrent: vi.fn(),
+  reattachRun: vi.fn(),
+  chat: vi.fn(),
+  cancel: vi.fn(),
+  deleteHistory: vi.fn(),
+  frontendToolResult: vi.fn(),
+  confirm: vi.fn(),
+  feedbackSubmit: vi.fn()
+}))
 
 vi.mock('@/utils/confirm-irreversible', () => ({
   confirmPublishByMode: confirmApi.confirmPublishByMode
@@ -36,8 +50,10 @@ vi.mock('@/router', () => ({
   ROUTE_NAMES: { exportWizard: 'export', importWizard: 'import', taskCenter: 'tasks' }
 }))
 vi.mock('@/stores/task', () => ({ useTaskStore: () => taskStore }))
+vi.mock('@/api/ai', () => ({ aiApi: aiPanelApi }))
 
 import { dispatchUiEvent, useWorkspaceStore } from '@/stores/workspace'
+import { executeFrontendTool } from '@/utils/frontend-tools'
 
 const PUBLISH_JOB = {
   id: 99,
@@ -82,6 +98,77 @@ describe('R-09 run_job PUBLISH：REPLACE 复用同一份确认', () => {
     expect(api.createJob).not.toHaveBeenCalled()
     expect(result.handled).toBe(false)
     expect(result.message).toContain('未启动')
+  })
+
+  it('真实工具链发布取消传专用用户码，模型回执保留原文且零 createJob', async () => {
+    confirmApi.confirmPublishByMode.mockResolvedValueOnce(false)
+
+    const execution = await executeFrontendTool({
+      name: 'run_job',
+      args: { taskId: 7, jobType: 'PUBLISH' },
+      runId: 'run-publish-confirm-cancel'
+    })
+
+    expect(execution.userTextCode).toBe('PUBLISH_CONFIRM_CANCELLED')
+    expect(execution.result).toContain('用户取消了发布确认，未启动发布作业')
+    expect(api.createJob).not.toHaveBeenCalled()
+  })
+
+  it('真实发布取消结果在 AiPanel 按中英定稿渲染，模型原文不变', async () => {
+    confirmApi.confirmPublishByMode.mockResolvedValueOnce(false)
+    const execution = await executeFrontendTool({
+      name: 'run_job',
+      args: { taskId: 7, jobType: 'PUBLISH' },
+      runId: 'run-publish-cancel-render'
+    })
+    aiPanelApi.health.mockResolvedValue({ available: true })
+    aiPanelApi.history.mockResolvedValue({ sessionId: '7001', count: 0, messages: [] })
+    aiPanelApi.runsCurrent.mockResolvedValue({ found: false, pendingEntries: [] })
+    const { useAiStore } = await import('@/stores/ai')
+    const store = useAiStore()
+    store.messages = [{
+      id: 'a-publish-cancel', role: 'assistant', content: '', reasoning: '', toolRuns: [], pendingCall: null,
+      streaming: false, done: true,
+      parts: [{
+        kind: 'tool', seg: 0, toolCallId: 'publish-cancel', name: 'run_job', kind2: 'FRONTEND',
+        status: 'failed', args: '{}', result: execution.result, userTextCode: execution.userTextCode,
+        requiresAction: false
+      }]
+    }]
+    store.historyLoaded = true
+    const { default: AiPanel } = await import('@/components/AiPanel/AiPanel.vue')
+    const wrapper = mount(AiPanel, {
+      global: {
+        stubs: {
+          'el-alert': true, 'el-button': { template: '<button><slot /></button>' }, 'el-empty': true,
+          'el-icon': { template: '<i><slot /></i>' }, 'el-input': true, 'el-skeleton': true,
+          'el-tag': { template: '<span><slot /></span>' }, FormRenderer: true
+        }
+      }
+    })
+    store.loading = true
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('发布确认已取消，未启动发布作业。')
+    applyLocale('en-US')
+    await wrapper.vm.$nextTick()
+    expect(wrapper.text()).toContain('Publish confirmation was cancelled. No publish job was started.')
+    expect(execution.result).toContain('用户取消了发布确认，未启动发布作业')
+    wrapper.unmount()
+    applyLocale('zh-CN')
+  })
+
+  it('其他 workspace 动作失败仍使用手动操作摘要', async () => {
+    const workspace = useWorkspaceStore()
+    workspace.pageId = 'import'
+    workspace.step = 'SELECT_DEFS'
+
+    const execution = await executeFrontendTool({
+      name: 'select_definitions',
+      args: { taskId: 7, defCodes: ['ORDER'] },
+      runId: 'run-other-workspace-failure'
+    })
+
+    expect(execution.userTextCode).toBe('MANUAL_ACTION')
   })
 
   it('权威模式解析成功后同步当前任务的 workspace.importMode（不记假 UI 动作）', async () => {

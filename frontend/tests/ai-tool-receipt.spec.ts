@@ -87,6 +87,8 @@ describe('A-10：写前原值已被用户手改 ⇒ rejected + UI_PRECONDITION_C
     const second = await aiFill({ ref: 'import.upload.query', value: 'AI-2', epoch: currentAiEpoch() })
     expect(second.outcome).toBe('rejected')
     expect(second.code).toBe('UI_PRECONDITION_CHANGED')
+    expect(second.userTextCode).toBe('UI_PRECONDITION_CHANGED')
+    expect(second.result).toContain('该控件在你上次写入后被用户手动改过')
     expect(node.value).toBe('USER-EDIT')
   })
 })
@@ -136,5 +138,19 @@ describe('ToolsRunStatus 映射：8 态 → 卡面状态', () => {
     expect(toolStatusOfOutcome('skipped')).toBe('skipped')
     expect(toolStatusOfOutcome('failed')).toBe('failed')
     expect(toolStatusOfOutcome('timeout')).toBe('failed')
+  })
+})
+
+
+describe('定稿：页面能力缺失时只向用户显示手动操作摘要', () => {
+  it('模型保留降级细节，用户投影不含工具名或手动提示模型话术', async () => {
+    enterExportPage()
+    const execution = await executeFrontendTool({
+      name: 'open_export_file_editor',
+      args: { taskId: 7, defCode: 'DEMO' },
+      runId: 'run-manual'
+    })
+    expect(execution.result).toContain('本页未注册该能力')
+    expect(execution.userTextCode).toBe('MANUAL_ACTION')
   })
 })

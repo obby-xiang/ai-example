@@ -42,10 +42,13 @@ class StreamWatchdogSegmentBudgetTest {
 
 	private ScheduledExecutorService scheduler;
 
+	private com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable identity;
+
 	private StreamWatchdog watchdog;
 
 	@BeforeEach
 	void setUp() {
+		this.identity = com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L);
 		this.scheduler = Executors.newSingleThreadScheduledExecutor(runnable -> {
 			Thread thread = new Thread(runnable, "watchdog-segment-test");
 			thread.setDaemon(true);
@@ -65,6 +68,7 @@ class StreamWatchdogSegmentBudgetTest {
 		if (this.scheduler != null) {
 			this.scheduler.shutdownNow();
 		}
+		this.identity.close();
 	}
 
 	/**

@@ -6714,3 +6714,154 @@ describe('批次6A：诊断分层、空态口径与无障碍（只写不跑，�
     wrapper.unmount()
   })
 })
+
+
+describe('定稿：拒绝系统 reason 不进入用户卡面', () => {
+  it('实时与只读拒绝卡隐藏系统 reason，模型回执和其他失败原因保留', async () => {
+    const rejected = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'rejected-copy', name: 'start_export', kind2: 'CONFIRM',
+        status: 'rejected', decision: 'rejected', args: '{}', reason: '用户拒绝执行',
+        result: '模型侧拒绝与未执行回执', requiresAction: false
+      }
+    ])
+    const failed = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'failed-copy', name: 'start_export', kind2: 'CONFIRM',
+        status: 'failed', args: '{}', reason: '配置校验失败', requiresAction: false
+      }
+    ])
+    failed.id = 'a-failed-copy'
+    const blocked = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'blocked-copy', name: 'start_export', kind2: 'CONFIRM',
+        status: 'blocked', decision: 'approved', args: '{}', reason: '已有作业正在执行', requiresAction: false
+      }
+    ])
+    blocked.id = 'a-blocked-copy'
+
+    const wrapper = await mountPanel([rejected, failed, blocked])
+
+    expect(wrapper.text()).toContain('已拒绝')
+    expect(wrapper.find('[data-testid="ro-badge-rejected-copy"]').text()).toContain('已拒绝')
+    expect(wrapper.find('[data-testid="ro-reason-rejected-copy"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="ro-reason-failed-copy"]').text()).toContain('配置校验失败')
+    expect(wrapper.find('[data-testid="ro-reason-blocked-copy"]').text()).toContain('已有作业正在执行')
+    expect(wrapper.text()).not.toContain('用户拒绝执行')
+    expect(wrapper.text()).toContain('配置校验失败')
+    expect(rejected.parts[0]).toMatchObject({ reason: '用户拒绝执行', result: '模型侧拒绝与未执行回执' })
+    wrapper.unmount()
+  })
+})
+
+
+describe('定稿：AI 不可用横幅与同义通知去重', () => {
+  it('仅横幅实际可见时抑制 aiDisabled 通知，横幅消失后保留提示', async () => {
+    const wrapper = await mountPanel([])
+    const store = useAiStore()
+    store.health = { available: false } as never
+    store.notice = 'AI 当前不可用'
+    store.noticeCode = 'ai.notice.aiDisabled'
+    store.noticeSeverity = 'error'
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('[data-testid="alert-degraded"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="notice-bar"]').exists()).toBe(false)
+
+    store.health = null
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('[data-testid="alert-degraded"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="notice-bar"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+})
+
+
+describe('定稿：拒绝与取消用户投影', () => {
+  it('实时 SSE 与 history 共用定稿摘要，模型原文留在 part.result', async () => {
+    const message = buildMessage([
+      {
+        kind: 'tool', seg: 0, toolCallId: 'copy-rejected', name: 'start_export', kind2: 'BACKEND',
+        status: 'rejected', decision: 'rejected', args: '{}', result: '模型拒绝原文', requiresAction: false
+      },
+      {
+        kind: 'tool', seg: 1, toolCallId: 'copy-stopped', name: 'start_export', kind2: 'CONFIRM',
+        status: 'cancelled', args: '{}', result: '模型停止原文', userTextCode: 'RUN_CANCELLED', requiresAction: false
+      },
+      {
+        kind: 'tool', seg: 2, toolCallId: 'copy-frontend-cancelled', name: 'ui_request_upload', kind2: 'FRONTEND',
+        status: 'cancelled', args: '{}', result: '模型前端取消原文', userTextCode: 'FRONTEND_CANCELLED', requiresAction: false
+      },
+      {
+        kind: 'tool', seg: 3, toolCallId: 'copy-publish-cancelled', name: 'start_publish', kind2: 'CONFIRM',
+        status: 'cancelled', args: '{}', result: '模型发布取消原文', userTextCode: 'PUBLISH_CONFIRM_CANCELLED', requiresAction: false
+      }
+    ])
+
+    const wrapper = await mountPanel([message])
+    useAiStore().loading = true
+    await wrapper.vm.$nextTick()
+    const text = wrapper.text()
+    expect(text).toContain('已拒绝，本次未执行。')
+    expect(text).toContain('本轮已停止，该操作未执行。')
+    expect(text).toContain('已取消，本次操作未完成。')
+    expect(text).toContain('发布确认已取消，未启动发布作业。')
+    expect(message.parts.filter((part) => part.kind === 'tool').map((part) => part.result)).toEqual([
+      '模型拒绝原文', '模型停止原文', '模型前端取消原文', '模型发布取消原文'
+    ])
+    wrapper.unmount()
+  })
+})
+
+
+describe('定稿：恢复缺口与未确认轮次', () => {
+  it('archive-window 保留缺口提示、去重试且允许继续发送', async () => {
+    const store = useAiStore()
+    store.manualRecovery = { scope: 'history', reason: 'archive-window', error: null }
+    const wrapper = await mountPanel([])
+    expect(wrapper.text()).toContain('更早的部分内容已无法恢复，你仍可继续提问。')
+    expect(wrapper.find('[data-testid="retry-history"]').exists()).toBe(false)
+    expect(store.canSend).toBe(true)
+    wrapper.unmount()
+  })
+
+  it('unconfirmed 保持发送锁和只读重新核对，不新增建对话出口', async () => {
+    const store = useAiStore()
+    store.manualRecovery = { scope: 'history', reason: 'unconfirmed', runId: 'run-review', error: null }
+    const retry = vi.spyOn(store, 'retryLoadHistory').mockResolvedValue(undefined)
+    const fresh = vi.spyOn(store, 'adoptFreshSession')
+    const wrapper = await mountPanel([])
+    expect(wrapper.text()).toContain('上一轮结果尚未确认，请重新核对；核对完成前暂不能发送。')
+    const button = wrapper.find('[data-testid="retry-history"]')
+    expect(button.text()).toBe('重新核对')
+    expect(store.canSend).toBe(false)
+    await button.trigger('click')
+    expect(retry).toHaveBeenCalledTimes(1)
+    expect(fresh).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+})
+
+
+describe('定稿：预检用户摘要', () => {
+  it('卡面只显示业务准备列表，模型 failureMessage 与检查明细原值保留', async () => {
+    const modelText = 'NOT APPROVED: CHECK_HAS_ITEMS / start_export / confirm gate'
+    const part: ToolPart = {
+      kind: 'tool', seg: 0, toolCallId: 'preflight-copy', name: 'start_export', kind2: 'CONFIRM',
+      status: 'failed', args: '{}', result: modelText, userTextCode: 'PRECHECK_FAILED',
+      userTextArgs: { reasons: ['MISSING_ITEMS', 'MISSING_UPLOAD', 'JOB_IN_FLIGHT', 'CONDITIONS_UNDECIDED', 'UNKNOWN'] },
+      requiresAction: false
+    }
+    const wrapper = await mountPanel([buildMessage([part])])
+    const rendered = wrapper.text()
+    expect(rendered).toContain('本次操作未执行，请先完成以下准备：')
+    for (const reason of ['尚未选择配置项', '尚未上传数据文件', '已有作业正在执行', '筛选条件尚未设置', '当前操作的前置条件尚未满足']) {
+      expect(rendered).toContain(reason)
+    }
+    for (const internal of ['CHECK_HAS_ITEMS', 'start_export', 'confirm gate']) {
+      expect(rendered).not.toContain(internal)
+    }
+    expect(part.result).toBe(modelText)
+    wrapper.unmount()
+  })
+})

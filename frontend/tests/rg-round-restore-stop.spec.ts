@@ -525,4 +525,45 @@ describe('批G · S3/S4：停止可见 + 半截正文立即入镜像', () => {
     const assistant = store.messages.find((item) => item.role === 'assistant')
     expect(assistant?.stopped).toBe(true)
   })
+
+  it('HITL 拒绝的 CANCELLED 历史不推断 stopped，刷新后只显示已拒绝', async () => {
+    const store = await freshStore()
+    store.sessionId = 's-rejected-history'
+    api.history.mockResolvedValue({
+      sessionId: 's-rejected-history',
+      count: 3,
+      messages: [
+        { type: 'USER', text: '创建导出任务' },
+        {
+          type: 'ASSISTANT',
+          text: '请确认创建',
+          runId: 'run-rejected-history',
+          outcome: 'CANCELLED',
+          stopped: false,
+          toolCalls: [{ id: 'tc-rejected-history', type: 'function', name: 'create_task', arguments: '{}' }],
+          toolCallStates: {
+            'tc-rejected-history': { status: 'REJECTED', kind: 'CONFIRM', decision: 'rejected' }
+          },
+          segments: [
+            { kind: 'text', text: '请确认创建', seq: 0 },
+            { kind: 'tool', toolCallId: 'tc-rejected-history', seq: 1 }
+          ]
+        },
+        {
+          type: 'TOOL',
+          text: '',
+          toolResponses: [{ id: 'tc-rejected-history', name: 'create_task', responseData: '已拒绝' }]
+        }
+      ]
+    })
+
+    await store.loadHistory()
+
+    const assistant = store.messages.find((item) => item.role === 'assistant')
+    expect(assistant?.stopped).not.toBe(true)
+    expect(assistant?.parts.find((part) => part.kind === 'tool')).toMatchObject({
+      status: 'rejected',
+      decision: 'rejected'
+    })
+  })
 })

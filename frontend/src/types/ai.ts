@@ -295,6 +295,7 @@ export interface AiHistoryMessage extends MessageTruncationFields {
     responseData?: string
     /** 与 tool_result 帧一致的用户文案稳定代码。 */
     userTextCode?: string | null
+    userTextArgs?: Record<string, unknown> | null
     /** 历史信封中的结构化任务/作业目标；不从响应文本反解。 */
     target?: Record<string, unknown>
     /**
@@ -326,6 +327,8 @@ export interface AiHistoryMessage extends MessageTruncationFields {
     code?: string | null
     /** 用户文案稳定摘要码；与 toolResponses 同码，供 transcript 历史恢复。 */
     userTextCode?: string | null
+    /** 用户摘要的结构化参数，预检等业务列表不从原文反解。 */
+    userTextArgs?: Record<string, unknown> | null
     /** 已执行工具的结构化目标；旧 history 缺省时不推断或反解。 */
     target?: Record<string, unknown>
     /**

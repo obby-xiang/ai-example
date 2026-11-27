@@ -58,14 +58,23 @@ public class StreamViolationException extends RuntimeException {
 
 	private final String code;
 
+	/** CANCELLED 是否来自主动停止整轮；HITL 拒绝/放弃当前动作显式为 false。 */
+	private final boolean userStopped;
+
 	public StreamViolationException(String code, String message) {
+		this(code, message, CANCELLED.equals(code));
+	}
+
+	public StreamViolationException(String code, String message, boolean userStopped) {
 		super(message);
 		this.code = code;
+		this.userStopped = userStopped;
 	}
 
 	public StreamViolationException(String code, String message, Throwable cause) {
 		super(message, cause);
 		this.code = code;
+		this.userStopped = CANCELLED.equals(code);
 	}
 
 	/**

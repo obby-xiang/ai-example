@@ -3,8 +3,8 @@
  * `b3-ar10-run-expiry.spec.ts`）。
  *
  * 场景：本页已知的寿命锚点已经到期，随后再对账（`/runs/current`）发现快照确实没了
- * （`found=false`）—— 此时必须**可见**地告知"运行态已按保留期失效"，而不是静默封口。
- * 出口由面板提供（刷新状态 / 新建会话），store 只落通知码，不落用户可见串。
+ * （`found=false`）—— 卡片保留"运行态已按保留期失效"的事实和既有出口，
+ * 不额外重复写顶部通知。
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -49,7 +49,7 @@ beforeEach(() => {
 })
 
 describe('AR-10 · 到期后不静默', () => {
-  it('已知锚点已到期且快照已消失 ⇒ 落可见通知并清锚点', async () => {
+  it('已知锚点已到期且快照已消失 ⇒ 保留失效卡事实且不重复通知', async () => {
     const { useAiStore } = await import('@/stores/ai')
     const ai = useAiStore()
     ai.sessionId = 'sess-expired'
@@ -64,11 +64,11 @@ describe('AR-10 · 到期后不静默', () => {
 
     await ai.restoreSuspendedSnapshot(() => true)
 
-    // 锚点保留为"已到期"（卡面继续显示已失效 + 出口），并落可见通知
+    // 锚点保留为"已到期"（卡面继续显示已失效 + 出口），顶部通知不重复。
     expect(ai.runExpiry?.runId).toBe('run-old')
     expect(ai.runExpiry?.remainingMs).toBe(0)
-    expect(ai.noticeCode).toBe('ai.notice.runExpired')
-    expect(ai.noticeSeverity).toBe('warning')
+    expect(ai.noticeCode).toBeNull()
+    expect(ai.noticeSeverity).not.toBe('warning')
   })
 
   it('没有已知锚点的空态不冒充到期（不写通知）', async () => {

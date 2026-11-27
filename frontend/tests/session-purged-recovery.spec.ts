@@ -125,7 +125,7 @@ describe('410 SESSION_PURGED ⇒ 本地换会话恢复（不 DELETE、不自动�
     expect(sessionStorage.getItem(mirrorStorageKey(OLD_SESSION))).toBeNull()
     // 通知：本地模板 + 中文译文（不回显后端中文原文时也不出现"新建对话后重试"这类后端措辞差异）
     expect(store.noticeCode).toBe('ai.notice.sessionPurged')
-    expect(store.notice).toContain('已为你新建对话')
+    expect(store.notice).toBe('对话已自动更新。刚才那条消息没有发出，内容已保留在输入框，请重新发送。')
     // 不重复 DELETE 已销毁的会话，也不自动重发
     expect(api.deleteHistory).not.toHaveBeenCalled()
     expect(api.chat).toHaveBeenCalledTimes(1)
@@ -170,7 +170,7 @@ describe('410 SESSION_PURGED ⇒ 本地换会话恢复（不 DELETE、不自动�
 
     expect(store.noticeCode).toBe('ai.notice.sessionPurged')
     expect(store.notice).not.toMatch(/[\u4e00-\u9fff]/)
-    expect(store.notice).toContain('new conversation')
+    expect(store.notice).toContain('updated automatically')
   })
 
   it('失败时本轮身份已被换掉（用户期间已新建对话）⇒ 不二次换会话、不覆盖提示', async () => {

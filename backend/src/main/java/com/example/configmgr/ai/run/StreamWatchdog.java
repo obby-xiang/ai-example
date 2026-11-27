@@ -72,12 +72,12 @@ public class StreamWatchdog implements AutoCloseable {
 	private final CancellationRegistry cancellations;
 
 	/**
-	 * 段起点的<b>播种值</b>（本尝试构造时刻）。
+	 * 段起点的<b>播种值</b>，与单次 attempt 的上游静默起点分开。
 	 *
 	 * <p>语义变更（2026-10-21 决策看板 {@code :14}）：本参数以前是"轮开始"，现在只是
 	 * {@link ToolActivityBeacon#segmentStartedAtMs(String, long)} 的兜底 —— 真正的段锚点由信标持有，
 	 * 恢复点（决策/回灌/续跑）会在工具循环线程上把它前移。看门狗每拍重读一次，因此运行中的段重置
-	 * 立刻生效。
+	 * 立刻生效；attempt 重试不重置此值，也不会获得新的段预算。
 	 */
 	private final long segmentSeedAtMs;
 
@@ -130,7 +130,7 @@ public class StreamWatchdog implements AutoCloseable {
 	public StreamWatchdog(String runId, ScheduledExecutorService scheduler, AiProperties.Resilience config,
 			ToolActivityBeacon beacon, CancellationRegistry cancellations, long segmentStartedAtMs,
 			Consumer<StreamViolationException> onViolation) {
-		this(runId, scheduler, null, config, beacon, cancellations, segmentStartedAtMs, onViolation);
+		this(runId, scheduler, null, config, beacon, cancellations, segmentStartedAtMs, segmentStartedAtMs, onViolation);
 	}
 
 	/**
@@ -140,6 +140,17 @@ public class StreamWatchdog implements AutoCloseable {
 	public StreamWatchdog(String runId, ScheduledExecutorService scheduler, ScheduledExecutorService cancelPollScheduler,
 			AiProperties.Resilience config, ToolActivityBeacon beacon, CancellationRegistry cancellations,
 			long segmentStartedAtMs, Consumer<StreamViolationException> onViolation) {
+		this(runId, scheduler, cancelPollScheduler, config, beacon, cancellations, segmentStartedAtMs,
+				segmentStartedAtMs, onViolation);
+	}
+
+	/**
+	 * @param segmentStartedAtMs 当前段预算的兜底起点，attempt 重试不得前移
+	 * @param attemptStartedAtMs 本次 attempt 首包及事件间静默的起始锚点
+	 */
+	public StreamWatchdog(String runId, ScheduledExecutorService scheduler, ScheduledExecutorService cancelPollScheduler,
+			AiProperties.Resilience config, ToolActivityBeacon beacon, CancellationRegistry cancellations,
+			long segmentStartedAtMs, long attemptStartedAtMs, Consumer<StreamViolationException> onViolation) {
 		this.runId = runId;
 		this.config = config;
 		this.beacon = beacon;
@@ -151,7 +162,7 @@ public class StreamWatchdog implements AutoCloseable {
 				? null : cancelPollScheduler;
 		// 身份在建立看门狗时（驱动线程）抓取，节拍线程回放 —— 调度器本身不做传播
 		this.identity = RequestContextUtils.currentOrNull();
-		this.lastUpstreamAtMs.set(segmentStartedAtMs);
+		this.lastUpstreamAtMs.set(attemptStartedAtMs);
 		// 同进程取消的加速通道：监听者只做"当场判定"，权威态仍在 Redis
 		this.cancelListener = cancellations.onCancel(runId, () -> fire(StreamViolationException.CANCELLED,
 				"turn cancelled (cancel flag set); upstream connection closed immediately"));

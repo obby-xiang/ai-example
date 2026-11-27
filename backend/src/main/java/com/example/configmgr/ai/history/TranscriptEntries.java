@@ -6,6 +6,7 @@ import com.example.configmgr.ai.run.PendingToolCall;
 import com.example.configmgr.ai.tool.ToolOutcome;
 import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultUserText;
+import com.example.configmgr.common.ErrorCodes;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.lang3.math.NumberUtils;
@@ -325,9 +326,18 @@ public final class TranscriptEntries {
         if (MapUtils.isNotEmpty(target)) {
             state.put("target", target);
         }
-        String userTextCode = ToolResultUserText.userTextCode(pending.getName(), pending.effectiveCode(), target);
+        Map<String, Object> userTextArgs = new LinkedHashMap<>();
+        if (ErrorCodes.PRECHECK_FAILED.equals(code)) {
+            userTextArgs.putAll(ToolResultUserText.preflightUserTextArgs(pending.getPreflight()));
+        }
+        Map<String, Object> displayArgs = new LinkedHashMap<>(target);
+        displayArgs.putAll(userTextArgs);
+        String userTextCode = ToolResultUserText.userTextCode(pending.getName(), code, displayArgs);
         if (userTextCode != null) {
             state.put("userTextCode", userTextCode);
+        }
+        if (MapUtils.isNotEmpty(userTextArgs)) {
+            state.put("userTextArgs", userTextArgs);
         }
         Map<String, Object> preflight = displayPreflight(pending.getPreflight());
         if (preflight != null) {

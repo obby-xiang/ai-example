@@ -496,7 +496,7 @@ public class ResilientChatService {
      *
      * <p>
      * L-98 起它同时是<b>记忆的写入键</b>：落定（{@link #finish}）与取消半截
-     * （{@link #stoppedRoundMessages}）都把本段思考全文写进 assistant 消息的 metadata，
+     * （{@link #cancelledRoundMessages}）都把本段思考全文写进 assistant 消息的 metadata，
      * 经 {@link MessageJsonCodec} 存进 {@code chat:mem:{<sid>}} —— 下一轮请求因此能回填
      * {@code reasoning_content}（DeepSeek 带 tools 时缺它会 400）。
      */
@@ -1388,7 +1388,8 @@ public class ResilientChatService {
         state.turnTextBody.setPendingSegmentFlush(() -> flushCorrectionPrefix(state.out, accumulator, state.turnTextBody));
         CompletableFuture<Void> settled = new CompletableFuture<>();
         StreamWatchdog watchdog = new StreamWatchdog(state.runId, this.watchdogExecutor, this.cancelPollExecutor,
-                state.config, this.beacon, this.cancellations, state.turnStartedAtMs, settled::completeExceptionally);
+                state.config, this.beacon, this.cancellations, state.turnStartedAtMs, startedAt,
+                settled::completeExceptionally);
         return new AttemptRound(accumulator, watchdog, settled, startedAt, beaconBefore);
     }
 
@@ -1548,7 +1549,7 @@ public class ResilientChatService {
         if (StreamViolationException.CANCELLED.equals(violation.getCode())) {
             stopKeepalive(state.keepalive);
             cancelTerminal(state.runId, state.sessionId, round.accumulator, state.budgetedAttempts, round.watchdog,
-                    state.out, state.turn);
+                    state.out, state.turn, violation.isUserStopped());
             return AttemptStep.RETURN;
         }
         boolean correctionPrefixFailure = correctionFlushFailed || violation instanceof CorrectionPrefixes.CorrectionPrefixException;
@@ -1866,7 +1867,10 @@ public class ResilientChatService {
                 .toList();
     }
 
-    private String createEntryCorrection(String runId, AiContext context) {
+    private record CreateEntryCorrectionRequest(String instruction, String mode) {
+    }
+
+    private CreateEntryCorrectionRequest createEntryCorrection(String runId, AiContext context) {
         List<PendingToolCall> unresolved = this.store.pendings(runId).stream()
                 .filter(pending -> AiToolNames.CREATE_TASK.equals(pending.getName())
                         && CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode()))
@@ -1876,7 +1880,8 @@ public class ResilientChatService {
             throw new AiStateUnavailableException("Create-entry correction tool is unavailable " + runId);
         }
         if (unresolved.isEmpty()) {
-            return missingCreateActionCorrection(runId, tools.getFirst());
+            return new CreateEntryCorrectionRequest(missingCreateActionCorrection(runId, tools.getFirst()),
+                    SpToolCallingManager.CREATE_ENTRY_CORRECTION_MISSING_ACTION);
         }
         if (unresolved.size() != 1 || this.createTaskReferenceResolver == null
                 || this.definitionCatalog == null || this.objectMapper == null) {
@@ -1895,12 +1900,13 @@ public class ResilientChatService {
             input.set("unresolved", this.objectMapper.valueToTree(resolution.unresolved()));
             input.put("createTaskDescription", tools.getFirst().getToolDefinition().description());
             input.set("createTaskSchema", this.objectMapper.readTree(tools.getFirst().getToolDefinition().inputSchema()));
-            return SyntheticMessages.EXPORT_CORRECTION_PREFIX
+            return new CreateEntryCorrectionRequest(SyntheticMessages.EXPORT_CORRECTION_PREFIX
                     + "上一次 create_task 因下列引用未唯一解析而失败。请依据原始对话、目录、未决项和 Schema，"
                     + "仅通过现有 create_task 返回一次完整参数，保留所有目标与条件，不得发明取值；"
                     + "conditions={} 表示补全未完成，不能进入确认；原始用户明确不筛选时必须显式返回 conditions.fields=[]，"
                     + "否则必须返回完整筛选条件。不得调用其他工具或直接创建任务。若仍无法确定，如实说明，不要重复已展示正文。\n"
-                    + this.objectMapper.writeValueAsString(input);
+                    + this.objectMapper.writeValueAsString(input),
+                    SpToolCallingManager.CREATE_ENTRY_CORRECTION_REFERENCES_UNRESOLVED);
         }
         catch (Exception ex) {
             throw new AiStateUnavailableException("Cannot build create-entry correction " + runId, ex);
@@ -2287,7 +2293,8 @@ public class ResilientChatService {
         AiContext latest = createEntry ? AiContext.fromMap(snapshot.getContext()) : latestContext(runId, fallbackContext);
         List<Message> history = correctionHistory(snapshot, fallbackHistory, prefixText, prefixReasoning);
         persistCorrectionHistory(runId, snapshot, history);
-        String instruction = createEntry ? createEntryCorrection(runId, latest) : exportWrapUpCorrection(latest.getTaskId());
+        CreateEntryCorrectionRequest correctionRequest = createEntry ? createEntryCorrection(runId, latest) : null;
+        String instruction = createEntry ? correctionRequest.instruction() : exportWrapUpCorrection(latest.getTaskId());
         history.add(SyntheticMessages.internalUser(instruction, SyntheticMessages.Kind.CORRECTION,
                 createEntry ? "create-entry" : "export-wrap-up"));
         ProviderRuntime correctionRuntime = createEntry
@@ -2301,6 +2308,7 @@ public class ResilientChatService {
             Map<String, Object> toolContext = new LinkedHashMap<>(options.getToolContext());
             toolContext.put(SpToolCallingManager.TOOL_CONTEXT_SUPPRESS_REASONING, true);
             toolContext.put(SpToolCallingManager.TOOL_CONTEXT_CREATE_ENTRY_CORRECTION, true);
+            toolContext.put(SpToolCallingManager.TOOL_CONTEXT_CREATE_ENTRY_CORRECTION_MODE, correctionRequest.mode());
             options.setToolContext(toolContext);
         }
         log.info("close correction request: history {} entries (incl. tool messages), type={} runId={}",
@@ -3488,7 +3496,7 @@ public class ResilientChatService {
     }
 
     /**
-     * L-75（真机 E2E 批② SRP 域 P-12）：**被停止的那一轮要留下可重建的消息**。
+     * L-75（真机 E2E 批② SRP 域 P-12）：**取消收尾的那一轮要留下可重建的消息**。
      *
      * <p>旧口径只看"有没有半截正文"：纯卡轮（本轮只有一张待决门卡、零正文、零工具执行结果）
      * 停止后什么都不写 ⇒ `/history` 只剩 USER，刷新后整条卡凭空消失。
@@ -3497,7 +3505,8 @@ public class ResilientChatService {
      * <ol>
      * <li>快照的 in-flight 条目就是"挂起那一轮的 assistant(tool_calls)"（挂起时由
      *     {@code RunStore#saveSuspended} 落盘、续跑侧 {@code ResumeService#rebuildAssistant} 同源重建），
-     *     这里按同一映射重建一条 assistant 消息（正文 = 半截正文，可为空），带 {@code stopped}；</li>
+     *     这里按同一映射重建一条 assistant 消息（正文 = 半截正文，可为空）；仅主动停止整轮时带
+     *     {@code stopped}，HITL 拒绝或放弃当前动作不得伪装成主动停止；</li>
      * <li>再补一条**配对**的 {@code role:tool}（结局 = 取消）—— 悬空的 {@code tool_calls} 会让下一轮
      *     请求被上游以"tool_calls 没有对应 tool 响应"拒绝，配对完整性是记忆面的硬约束；</li>
      * <li>历史里已经出现过该 toolCallId（异常流程下的重复挂起）时不重复造消息。</li>
@@ -3507,8 +3516,8 @@ public class ResilientChatService {
      * <p><b>L-98</b>：这条半截 assistant 同时携带本段已产生的思考全文（键
      * {@link #REASONING_METADATA_KEY}）—— 取消不是"丢历史"的理由，后续每一轮都要能回填。
      */
-    private List<Message> stoppedRoundMessages(List<Message> history, RunSnapshot snapshot, String partial,
-                                               String reasoning) {
+    private List<Message> cancelledRoundMessages(List<Message> history, RunSnapshot snapshot, String partial,
+                                                 String reasoning, boolean userStopped) {
         List<PendingToolCall> inFlight = ObjectUtils.defaultIfNull(snapshot.getInFlightToolCalls(), List.of());
         List<AssistantMessage.ToolCall> calls = new ArrayList<>(inFlight.size());
         List<ToolResponseMessage.ToolResponse> responses = new ArrayList<>(inFlight.size());
@@ -3519,7 +3528,7 @@ public class ResilientChatService {
             calls.add(new AssistantMessage.ToolCall(item.getToolCallId(),
                     ObjectUtils.defaultIfNull(item.getType(), "function"), item.getName(), item.getArguments()));
             String text = StringUtils.isNotBlank(item.getResultText()) ? item.getResultText()
-                    : "本轮对话已被用户取消，该工具未执行。";
+                    : userStopped ? "本轮对话已被用户取消，该工具未执行。" : "本轮对话已结束，该工具未执行。";
             responses.add(new ToolResponseMessage.ToolResponse(item.getToolCallId(), item.getName(),
                     ToolResultEnvelope.of(ToolOutcome.CANCELLED, ToolOutcome.CODE_RUN_CANCELLED, text,
                             item.getArguments()).toJson()));
@@ -3532,7 +3541,7 @@ public class ResilientChatService {
         if (snapshot.getAssistantMetadata() != null) {
             metadata.putAll(snapshot.getAssistantMetadata());
         }
-        metadata.putAll(stoppedMetadata(reasoning));
+        metadata.putAll(cancelledMetadata(reasoning, userStopped));
         AssistantMessage.Builder builder = AssistantMessage.builder()
                 .content(partial)
                 .properties(metadata);
@@ -3578,7 +3587,7 @@ public class ResilientChatService {
 
     /**
      * 思考全文是否随消息落记忆：{@code app.ai.reasoning.persist-content}（默认 true）。
-     * 关掉时返回空串（{@link #assistantMessage} / {@link #stoppedMetadata} 据此不写该键），
+     * 关掉时返回空串（{@link #assistantMessage} / {@link #cancelledMetadata} 据此不写该键），
      * 展示开关（{@code display-enabled}）只管帧与历史，不影响这里。
      */
     private String storedReasoning(String reasoning) {
@@ -3586,11 +3595,13 @@ public class ResilientChatService {
     }
 
     /**
-     * 取消半截的元数据：{@code stopped} 标记 + 本段已产生的思考全文（可空）。
+     * 取消收尾元数据：主动停止写 {@code stopped}，HITL 决策只结束当前动作；两者都保留思考全文。
      */
-    private static Map<String, Object> stoppedMetadata(String reasoning) {
+    private static Map<String, Object> cancelledMetadata(String reasoning, boolean userStopped) {
         Map<String, Object> metadata = new LinkedHashMap<>();
-        metadata.put(STOPPED_KEY, true);
+        if (userStopped) {
+            metadata.put(STOPPED_KEY, true);
+        }
         if (StringUtils.isNotEmpty(reasoning)) {
             metadata.put(REASONING_METADATA_KEY, reasoning);
         }
@@ -3651,6 +3662,15 @@ public class ResilientChatService {
      * park 后没有驱动线程，取消仍走同一终局；只重建计量锚点，不调用模型。
      */
     public void cancelParked(String runId) {
+        cancelParked(runId, true);
+    }
+
+    /** HITL 拒绝或放弃当前动作后结束 run；这不是主动停止整轮，不写 stopped。 */
+    public void cancelParkedForDecision(String runId) {
+        cancelParked(runId, false);
+    }
+
+    private void cancelParked(String runId, boolean userStopped) {
         RunSnapshot snapshot = this.store.get(runId);
         if (snapshot == null) {
             return;
@@ -3660,7 +3680,7 @@ public class ResilientChatService {
         TurnContext turn = resumedTurn(runId, AiContext.fromMap(snapshot.getContext()), history, snapshot.getModelId(),
                 ObjectUtils.toString(snapshot.getProviderId(), (String) null),
                 System.currentTimeMillis(), snapshot);
-        cancelTerminal(runId, sessionId, null, snapshot.getAttempts(), null, this.registry.of(runId), turn);
+        cancelTerminal(runId, sessionId, null, snapshot.getAttempts(), null, this.registry.of(runId), turn, userStopped);
     }
 
     /**
@@ -3686,8 +3706,9 @@ public class ResilientChatService {
     }
 
     /**
-     * 取消终局：快照转 CANCELLED，未决条目落 CANCELLED **并补裁决帧**（S5），
-     * 半截正文**写进记忆并带 {@code stopped} 标记**（S4），终帧 {@code done{cancelled:true}}。
+     * 取消终局：快照转 CANCELLED，未决条目落 CANCELLED **并补裁决帧**（S5），终帧
+     * {@code done{cancelled:true}}。主动停止整轮的半截正文带 {@code stopped}；HITL 拒绝或放弃
+     * 当前动作虽复用 CANCELLED run 终态，但不写该标记，工具配对与零副作用语义不变。
      *
      * <p>
      * S4 口径变更（批G）：旧口径"半条消息会污染下一轮记忆"把代价留给了用户 —— 停止后刷新，
@@ -3696,16 +3717,21 @@ public class ResilientChatService {
      */
     private void cancelTerminal(String runId, String sessionId, Accumulator accumulator, int attempts,
                                 StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn) {
+        cancelTerminal(runId, sessionId, accumulator, attempts, watchdog, out, turn, true);
+    }
+
+    private void cancelTerminal(String runId, String sessionId, Accumulator accumulator, int attempts,
+                                StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn, boolean userStopped) {
         // 交棒执行体与本驱动线程可能同时收尾同一轮（交棒刚取到租、本线程的写门又恰好恢复）：
         // "读快照判终态"与"写终态"必须原子，否则两边都读到 SUSPENDED ⇒ 两条终帧。
         // 未装配交棒器（轻装配/直接 new 的单测）时不加锁，与引入本批之前逐字同形。
         Object monitor = this.cancelFinalizer == null ? null : this.cancelFinalizer.finalizeMonitor(runId);
         if (monitor == null) {
-            cancelTerminalLocked(runId, sessionId, accumulator, attempts, watchdog, out, turn);
+            cancelTerminalLocked(runId, sessionId, accumulator, attempts, watchdog, out, turn, userStopped);
             return;
         }
         synchronized (monitor) {
-            cancelTerminalLocked(runId, sessionId, accumulator, attempts, watchdog, out, turn);
+            cancelTerminalLocked(runId, sessionId, accumulator, attempts, watchdog, out, turn, userStopped);
         }
     }
 
@@ -3713,7 +3739,8 @@ public class ResilientChatService {
     }
 
     private CancelledPersistence persistCancelledSnapshot(String runId, String sessionId, Accumulator accumulator,
-                                                          int attempts, RunSnapshot snapshot, String partial) {
+                                                          int attempts, RunSnapshot snapshot, String partial,
+                                                          boolean userStopped) {
         if (snapshot == null) {
             return new CancelledPersistence(null, List.of(), false);
         }
@@ -3722,8 +3749,8 @@ public class ResilientChatService {
         // 合并后的停止消息追加在末尾（真实工具顺序之后）。
         removeAssistantWithText(history, correctionPrefix(runId));
         boolean appendedStopped = false;
-        for (Message stopped : stoppedRoundMessages(history, snapshot, partial,
-                storedReasoning(accumulator == null ? "" : accumulator.unpersistedReasoning()))) {
+        for (Message stopped : cancelledRoundMessages(history, snapshot, partial,
+                storedReasoning(accumulator == null ? "" : accumulator.unpersistedReasoning()), userStopped)) {
             history.add(stopped);
             appendedStopped = true;
         }
@@ -3760,7 +3787,8 @@ public class ResilientChatService {
     }
 
     private void cancelTerminalLocked(String runId, String sessionId, Accumulator accumulator, int attempts,
-                                      StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn) {
+                                      StreamWatchdog watchdog, SseChatEmitter out, TurnContext turn,
+                                      boolean userStopped) {
         RunSnapshot snapshot = this.store.get(runId);
         // 只有真正落库的取消态才交给完成态写入；交棒/被拒写时由接手的执行体收尾。
         RunSnapshot terminalSnapshot = null;
@@ -3810,7 +3838,8 @@ public class ResilientChatService {
         // 不再让 emitCancelOutcomes 重复 cancelPendings / 重复整表读。
         this.store.cancelPendings(runId);
         List<PendingToolCall> cancelledPendings = this.store.pendingsLenient(runId);
-        CancelledPersistence persistence = persistCancelledSnapshot(runId, sessionId, accumulator, attempts, snapshot, partial);
+        CancelledPersistence persistence = persistCancelledSnapshot(runId, sessionId, accumulator, attempts, snapshot,
+                partial, userStopped);
         terminalSnapshot = persistence.snapshot();
         List<Message> history = persistence.history();
         if (persistence.persisted()) {
@@ -3839,6 +3868,7 @@ public class ResilientChatService {
                     attempts, watchdog == null ? 0 : watchdog.upstreamEvents(), accumulator == null ? "" : accumulator.tailSummary());
             Map<String, Object> extra = new LinkedHashMap<>();
             extra.put("cancelled", true);
+            extra.put("userStopped", userStopped);
             extra.put("attempts", attempts);
             extra.put("upstreamEvents", watchdog == null ? 0 : watchdog.upstreamEvents());
             extra.put("partialChars", partialChars);

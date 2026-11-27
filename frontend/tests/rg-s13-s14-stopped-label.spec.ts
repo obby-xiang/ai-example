@@ -184,6 +184,116 @@ describe('批G · S13：停止后确认卡是「✗ 已取消」，不是「! �
 
     expect((store.messages[1] as ChatMessage).stopped).toBe(true)
   })
+
+  it('HITL 拒绝后的 done{cancelled} 不得把回复误标为已停止', async () => {
+    const store = await freshStore()
+    const host = {
+      ...cardOnlyHost(toolPart({
+        toolCallId: 'tc-rejected-live',
+        status: 'rejected',
+        decision: 'rejected',
+        requiresAction: false
+      }), 'a-rejected-live'),
+      runId: 'run-rejected-live'
+    }
+    store.sessionId = 's-rejected-live'
+    store.messages = [host]
+    store.activeRunId = 'run-rejected-live'
+    store.loading = true
+
+    store.handleFrame(
+      { type: 'done', runId: 'run-rejected-live', seq: 30, cancelled: true, userStopped: false } as never
+    )
+
+    expect(store.lastRoundOutcome).toBe('cancelled')
+    expect((store.messages[0] as ChatMessage).stopped).not.toBe(true)
+  })
+
+  it('HITL 放弃后的 AI_RUN_CANCELLED error 不得把回复误标为已停止', async () => {
+    const store = await freshStore()
+    const host = {
+      ...cardOnlyHost(toolPart({
+        toolCallId: 'tc-rejected-error',
+        status: 'rejected',
+        decision: 'rejected',
+        requiresAction: false
+      }), 'a-rejected-error'),
+      runId: 'run-rejected-error'
+    }
+    store.sessionId = 's-rejected-error'
+    store.messages = [host]
+    store.activeRunId = 'run-rejected-error'
+    store.loading = true
+
+    store.handleFrame(
+      { type: 'error', runId: 'run-rejected-error', seq: 31, code: 'AI_RUN_CANCELLED', userStopped: false } as never
+    )
+
+    expect(store.lastRoundOutcome).toBe('cancelled')
+    expect((store.messages[0] as ChatMessage).stopped).not.toBe(true)
+  })
+
+  it('无终帧 CANCELLED 快照不新写 stopped，本地主动停止标记仍保留', async () => {
+    const store = await freshStore()
+    const rejectedHost = {
+      ...cardOnlyHost(toolPart({
+        toolCallId: 'tc-rejected-snapshot',
+        status: 'rejected',
+        decision: 'rejected',
+        requiresAction: false
+      }), 'a-rejected-snapshot'),
+      runId: 'run-rejected-snapshot'
+    }
+    store.messages = [rejectedHost]
+
+    store.sealAuthoritativeTerminal('run-rejected-snapshot', {
+      cancelled: true,
+      snapshotStatus: 'CANCELLED'
+    })
+
+    expect((store.messages[0] as ChatMessage).stopped).not.toBe(true)
+
+    const stoppedHost = {
+      ...cardOnlyHost(toolPart({ toolCallId: 'tc-local-stop-snapshot' }), 'a-local-stop-snapshot'),
+      runId: 'run-local-stop-snapshot',
+      stopped: true
+    }
+    store.messages = [stoppedHost]
+    store.sealAuthoritativeTerminal('run-local-stop-snapshot', {
+      cancelled: true,
+      snapshotStatus: 'CANCELLED'
+    })
+    expect((store.messages[0] as ChatMessage).stopped).toBe(true)
+  })
+
+  it('跨页签主动停止以明确 wire 来源恢复 done 和 error 的已停止', async () => {
+    const store = await freshStore()
+    const host = {
+      ...cardOnlyHost(toolPart({ toolCallId: 'tc-cross-tab' }), 'a-cross-tab'),
+      runId: 'run-cross-tab'
+    }
+    store.sessionId = 's-cross-tab'
+    store.messages = [host]
+    store.activeRunId = 'run-cross-tab'
+    store.loading = true
+
+    store.handleFrame(
+      { type: 'done', runId: 'run-cross-tab', seq: 30, cancelled: true, userStopped: true } as never
+    )
+    expect((store.messages[0] as ChatMessage).stopped).toBe(true)
+
+    const errorHost = {
+      ...cardOnlyHost(toolPart({ toolCallId: 'tc-cross-tab-error' }), 'a-cross-tab-error'),
+      runId: 'run-cross-tab-error'
+    }
+    store.messages = [errorHost]
+    store.activeRunId = 'run-cross-tab-error'
+    store.loading = true
+    store.handleFrame(
+      { type: 'error', runId: 'run-cross-tab-error', seq: 31, code: 'AI_RUN_CANCELLED', userStopped: true } as never
+    )
+    expect((store.messages[0] as ChatMessage).stopped).toBe(true)
+  })
 })
 
 describe('批G · S14：「已停止」chip 不依赖正文（卡-only 宿主也要有）', () => {

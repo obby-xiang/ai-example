@@ -4,7 +4,11 @@ import com.example.configmgr.common.ErrorCodes;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.math.NumberUtils;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 工具结果的两份人读文案（2026-10-26 批次 6C / N9）。
@@ -54,11 +58,15 @@ public final class ToolResultUserText {
             Map.entry(ErrorCodes.SHEET_DISABLED,
                     "表格功能已被管理员关闭，这一步没有执行。"),
             Map.entry(ErrorCodes.SCOPE_NOT_DISCLOSED,
-                    "当前页面或步骤不支持这个操作，这一步没有执行。"),
+                    "当前页面或步骤不支持这个操作，本次未执行。"),
             Map.entry(ErrorCodes.TOOL_TIMEOUT,
                     "这一步没有在时限内完成，结果尚未确认；该操作可能已产生部分变化，请核对后再继续。"),
             Map.entry(ErrorCodes.TOOL_ALREADY_CLAIMED,
-                    "这一步已由其他执行实例接管，本次没有重复执行。"),
+                    "系统正在处理该操作，本次没有重复执行。"),
+            Map.entry(ErrorCodes.RUN_CANCELLED,
+                    "本轮已停止，该操作未执行。"),
+            Map.entry(ErrorCodes.FRONTEND_CANCELLED,
+                    "已取消，本次操作未完成。"),
             Map.entry(ErrorCodes.TOOL_EXECUTION_FAILED,
                     "操作未能完成，可能已有部分变化；请核对当前状态后再继续，或联系管理员。"),
             Map.entry("HOST_FORM_PARK_FAILED", "表单未能打开，本次未执行；请稍后重试。"),
@@ -74,6 +82,9 @@ public final class ToolResultUserText {
 
     /** 命中用户摘要时复用原机器码作为本地化键；原文透传时没有摘要码。 */
     public static String userTextCode(String code) {
+        if (ErrorCodes.PRECHECK_FAILED.equals(code)) {
+            return code;
+        }
         return code != null && SUMMARIES.containsKey(code) ? code : null;
     }
 
@@ -112,8 +123,68 @@ public final class ToolResultUserText {
         if (ErrorCodes.CREATE_TASK_TURN_LIMIT.equals(code) && taskId != null) {
             return "本轮已创建任务 #" + taskId + "；同一轮只允许创建一次任务，这一次没有再创建。";
         }
+        if (ErrorCodes.PRECHECK_FAILED.equals(code)) {
+            return preflightSummary(structuredArgs);
+        }
         String summary = SUMMARIES.get(code);
         return summary == null ? modelText : summary;
+    }
+
+    public static Map<String, Object> preflightUserTextArgs(Map<String, Object> preflight) {
+        Object rawChecks = preflight == null ? null : preflight.get("checks");
+        if (!(rawChecks instanceof List<?> checks)) {
+            return Map.of();
+        }
+        Set<String> reasons = new LinkedHashSet<>();
+        boolean taskMissing = false;
+        for (Object rawCheck : checks) {
+            if (rawCheck instanceof Map<?, ?> check && Boolean.FALSE.equals(check.get("pass"))
+                    && "TASK_EXISTS".equals(String.valueOf(check.get("code")))) {
+                taskMissing = true;
+            }
+        }
+        for (Object rawCheck : checks) {
+            if (rawCheck instanceof Map<?, ?> check && Boolean.FALSE.equals(check.get("pass"))) {
+                String code = String.valueOf(check.get("code"));
+                reasons.add(taskMissing && "NO_JOB_IN_FLIGHT".equals(code)
+                        ? "PREPARATION_REQUIRED" : preflightReasonCode(code));
+            }
+        }
+        return reasons.isEmpty() ? Map.of() : Map.of("reasons", List.copyOf(reasons));
+    }
+
+    private static String preflightReasonCode(String checkCode) {
+        return switch (checkCode) {
+            case "HAS_ITEMS" -> "MISSING_ITEMS";
+            case "HAS_UPLOAD" -> "MISSING_UPLOAD";
+            case "NO_JOB_IN_FLIGHT" -> "JOB_IN_FLIGHT";
+            case "CONDITIONS_DECIDED" -> "CONDITIONS_UNDECIDED";
+            default -> "PREPARATION_REQUIRED";
+        };
+    }
+
+    private static String preflightSummary(Map<String, Object> structuredArgs) {
+        Object raw = structuredArgs == null ? null : structuredArgs.get("reasons");
+        List<String> items = new ArrayList<>();
+        if (raw instanceof List<?> reasons) {
+            for (Object reason : reasons) {
+                items.add(preflightReasonText(String.valueOf(reason)));
+            }
+        }
+        if (items.isEmpty()) {
+            items.add(preflightReasonText("PREPARATION_REQUIRED"));
+        }
+        return "本次操作未执行，请先完成以下准备：\n- " + String.join("\n- ", items);
+    }
+
+    private static String preflightReasonText(String reason) {
+        return switch (reason) {
+            case "MISSING_ITEMS" -> "尚未选择配置项";
+            case "MISSING_UPLOAD" -> "尚未上传数据文件";
+            case "JOB_IN_FLIGHT" -> "已有作业正在执行";
+            case "CONDITIONS_UNDECIDED" -> "筛选条件尚未设置";
+            default -> "当前操作的前置条件尚未满足";
+        };
     }
 
     private static boolean isCreateOnly(Map<String, Object> structuredArgs) {

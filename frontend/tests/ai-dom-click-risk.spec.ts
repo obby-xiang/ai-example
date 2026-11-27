@@ -27,6 +27,7 @@ describe('T-31：consequential 拒执', () => {
     expect(out.outcome).toBe('failed')
     expect(out.result).toContain('未执行')
     expect(out.result).toContain('请改用注册动作 start_export')
+    expect(out.userTextCode).toBe('CONSEQUENTIAL_ACTION')
     expect(spy).toHaveBeenCalledTimes(0)
   })
 
@@ -40,6 +41,7 @@ describe('T-31：consequential 拒执', () => {
     const out = await aiClick({ ref: 'export.save', epoch: currentAiEpoch() })
     expect(out.result).toContain('未执行')
     expect(out.result).toContain('请提示用户手动完成')
+    expect(out.userTextCode).toBe('MANUAL_ACTION')
     expect(spy).toHaveBeenCalledTimes(0)
   })
 
@@ -53,6 +55,7 @@ describe('T-31：consequential 拒执', () => {
     const out = await aiClick({ ref: 'export.upload.choose', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('failed')
     expect(out.result).toContain('ui_request_upload')
+    expect(out.userTextCode).toBe('MANUAL_FILE_PICK')
     expect(spy).toHaveBeenCalledTimes(0)
   })
 })

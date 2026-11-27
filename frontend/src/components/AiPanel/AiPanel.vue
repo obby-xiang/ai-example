@@ -97,14 +97,14 @@
         <span class="block text-[11.8px] text-[#57606a] break-words [overflow-wrap:anywhere]">{{ recoveryErrorText() }}</span>
       </div>
       <button
-        v-if="ai.manualRecovery?.reason !== 'transcript-degraded'"
+        v-if="ai.manualRecovery?.reason !== 'transcript-degraded' && ai.manualRecovery?.reason !== 'archive-window'"
         type="button"
         data-testid="retry-history"
         class="flex-none whitespace-nowrap rounded-[8px] border border-solid border-[#e3e6ea] bg-white px-[11px] py-[4px] text-[12.2px] text-[#57606a] transition-all duration-[150ms] hover:border-[#8b949e] hover:text-[#1f2328]"
         :disabled="ai.restoringRecovery"
         @click="retryRecoveryLoad()"
       >
-        {{ t('ai.panel.retryRecovery') }}
+        {{ t(ai.manualRecovery?.reason === 'unconfirmed' ? 'ai.panel.reviewRecovery' : 'ai.panel.retryRecovery') }}
       </button>
     </div>
 
@@ -4173,11 +4173,17 @@ function displayToolResult(text: string | null | undefined): string {
 }
 
 function toolResultText(part: ToolPart): string {
+  if (part.status === 'rejected' || part.decision === 'rejected') {
+    return t('ai.panel.toolResult.REJECTED')
+  }
   const code = part.userTextCode?.trim()
   if (!code) {
     return displayToolResult(part.result)
   }
   const args = userTextArgsOf(part) ?? {}
+  if (code === 'PRECHECK_FAILED') {
+    return preflightResultText(args)
+  }
   const createdTaskId = ['CREATE_TASK_TURN_LIMIT', 'CREATE_TASK_SUCCESS', 'CREATE_TASK_CREATE_ONLY'].includes(code)
     ? numericArgOf(args, 'taskId')
     : null
@@ -4186,6 +4192,18 @@ function toolResultText(part: ToolPart): string {
     : code.startsWith('ai.') ? code : `ai.panel.toolResult.${code}`
   const translated = t(key, { ...args, id: createdTaskId ?? '' })
   return displayToolResult(translated === key ? part.result : translated)
+}
+
+function preflightResultText(args: Record<string, unknown>): string {
+  const reasons = Array.isArray(args.reasons) ? args.reasons : []
+  const items = reasons.length > 0 ? reasons : ['PREPARATION_REQUIRED']
+  const lines = items.map((reason) => {
+    const code = typeof reason === 'string' && ['MISSING_ITEMS', 'MISSING_UPLOAD', 'JOB_IN_FLIGHT', 'CONDITIONS_UNDECIDED'].includes(reason)
+      ? reason
+      : 'PREPARATION_REQUIRED'
+    return `- ${t(`ai.panel.preflightReasons.${code}`)}`
+  })
+  return `${t('ai.panel.preflightPrefix')}\n${lines.join('\n')}`
 }
 
 function textPartOf(block: Block): TextPart | null {
@@ -4206,6 +4224,9 @@ function textTruncationTitle(block: Block): string {
  * - 其余失败 / 拒绝原因 ⇒ 原文（多行错误文案不截断，v-show 口径不变）。
  */
 function reasonText(part: ToolPart): string {
+  if (part.status === 'rejected' || part.decision === 'rejected') {
+    return ''
+  }
   const reason = part.reason ?? ''
   if (part.resultView) {
     return reasonHeadline(reason)
@@ -4234,11 +4255,20 @@ function diagnosticHumanOf(part: ToolPart): string | null {
 
 /** 机器向原文不上用户卡面；分层命中时只保留对应的人话说明。 */
 function isOutputSupersededByDiagnostics(part: ToolPart): boolean {
-  return diagnosticOf(part) !== null && isPartResultInternal(part)
+  return diagnosticOf(part) !== null && part.userTextCode !== 'PRECHECK_FAILED' && isPartResultInternal(part)
 }
 
 /** 只读卡原因保留业务说明；机器标记与整段 JSON 不上用户面。 */
 function readOnlyReasonText(part: ToolPart): string {
+  if (part.status === 'rejected' || part.decision === 'rejected') {
+    return ''
+  }
+  if (part.userTextCode === 'PRECHECK_FAILED') {
+    return toolResultText(part)
+  }
+  if (part.status === 'cancelled' && part.kind2 === 'CONFIRM' && part.userTextCode) {
+    return toolResultText(part)
+  }
   if (diagnosticOf(part) === 'skipped') {
     return ''
   }
@@ -4299,8 +4329,9 @@ const ALERT_TONE: Record<'error' | 'primary' | 'success' | 'gray', { box: string
 const noticeIsError = computed(() => ai.notice !== null && ai.noticeSeverity === 'error')
 
 /** 池饱和已有专属 Alert 时，通知槽不再重复同一事实。 */
-const noticeCoveredByAlert = computed(() => ai.poolSaturated !== null
+const noticeCoveredByAlert = computed(() => (ai.poolSaturated !== null
   && (ai.noticeCode === 'ai.notice.poolSaturated' || ai.noticeCode === 'ai.notice.poolSaturatedWithSize'))
+  || (healthBlocksSend.value && ai.noticeCode === 'ai.notice.aiDisabled'))
 
 /** 自动恢复通知静默；最终恢复失败由 recoveryErrorVisible 单独呈现。 */
 const noticeBarVisible = computed(() => ai.notice !== null

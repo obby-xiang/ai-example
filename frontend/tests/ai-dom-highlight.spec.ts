@@ -36,6 +36,8 @@ describe('T-23：三重冗余高亮', () => {
     const out = await aiHighlight({ ref: 'import.upload.choose', epoch: currentAiEpoch() })
     expect(out.outcome).toBe('ok')
     expect(out.result).toContain('已高亮')
+    expect(out.userTextCode).toBe('UI_HIGHLIGHTED')
+    expect(out.userTextArgs).toEqual({ target: '上传入口' })
     const node = document.querySelector('[data-ai-ref="import.upload.choose"]') as HTMLElement
     expect(node.getAttribute('data-ai-highlighted')).toBe('true')
     expect(node.className).toContain('ring-2')

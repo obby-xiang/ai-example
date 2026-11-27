@@ -469,6 +469,9 @@ export interface FrontendToolExecution {
    * 结局信息走 `outcome` 字段而非文本编码（D11：不加 `[unknown]` 类机器前缀）。
    */
   result: string
+  /** 用户摘要与模型 result 分离，不随前端结果回灌。 */
+  userTextCode?: string
+  userTextArgs?: Record<string, string | number>
   /**
    * 表格工具的采样元数据（AI 表格工具治理批；可选）：随回灌体上送，供后端
    * `tool_call_end` 的 additive 字段、`ai:safety:` 台账与 `/health.sheet` 计数使用。

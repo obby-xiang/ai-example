@@ -386,9 +386,8 @@ describe('4 · 重连进度通知与空回复重试口径', () => {
       code: 'EMPTY_REPLY',
       emptyReply: true
     }))
-    expect(store.noticeCode).not.toBe('ai.notice.upstreamRetry')
-    expect(store.noticeText ?? '').not.toContain('连接中断')
-    expect(store.noticeText ?? '').not.toContain('尚未产出内容')
+    expect(store.noticeCode).toBeNull()
+    expect(store.noticeText).toBeNull()
 
     store.handleFrame(asFrame({
       type: 'retry',

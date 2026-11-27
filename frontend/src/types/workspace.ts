@@ -146,4 +146,6 @@ export interface UiEventResult {
   handled: boolean
   /** 说明文本：'已打开导出向导' / '当前页面不支持该动作' 等 */
   message: string
+  /** 可选用户摘要码；message 始终是模型/工作区原始回执。 */
+  userTextCode?: string
 }

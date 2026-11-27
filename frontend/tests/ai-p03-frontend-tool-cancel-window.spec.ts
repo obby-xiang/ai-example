@@ -22,6 +22,7 @@ import type { ChatMessage, ToolPart } from '@/types/ai'
 import type { SseFrame } from '@/types/sse'
 import { useAiStore } from '@/stores/ai'
 import { installIdentityFixture } from './ai-identity-fixture'
+import { FakeLockManager } from './tab-ownership-fixtures'
 
 const api = vi.hoisted(() => ({
   health: vi.fn(),
@@ -108,6 +109,7 @@ beforeEach(() => {
 
 afterEach(() => {
   useAiStore().adoptFreshSession()
+  vi.unstubAllGlobals()
 })
 
 describe('P03：先回灌受理，仍在同轮才写最终状态', () => {
@@ -190,6 +192,7 @@ describe('P03：先回灌受理，仍在同轮才写最终状态', () => {
   })
 
   it('执行器异常 ⇒ finally 式收敛为 failed（不留永久 running）', async () => {
+    vi.stubGlobal('navigator', { ...navigator, locks: new FakeLockManager() })
     frontendTools.executeFrontendTool.mockRejectedValue(new Error('执行器炸了'))
 
     const store = useAiStore()
@@ -201,6 +204,8 @@ describe('P03：先回灌受理，仍在同轮才写最终状态', () => {
     expect(toolPart(message, 'p1').status).toBe('failed')
     expect(toolPart(message, 'p1').status).not.toBe('running')
     expect(toolPart(message, 'p1').requiresAction).toBe(false)
+    expect(toolPart(message, 'p1').userTextCode).toBe('FRONTEND_EXECUTOR_FAILED')
+    expect(toolPart(message, 'p1').result).toContain('前端工具执行异常')
   })
 
   it('执行器超时 ⇒ 段收敛为终态（不是永久 running），回灌带 outcome=timeout', async () => {
@@ -223,5 +228,47 @@ describe('P03：先回灌受理，仍在同轮才写最终状态', () => {
       expect.objectContaining({ toolCallId: 'p1', outcome: 'timeout' }),
       expect.objectContaining({ headers: expect.any(Object) })
     )
+  })
+})
+
+
+describe('定稿：前端工具用户投影与模型回执分离', () => {
+  it('真实执行入口保留模型 result，卡段与通知使用结构化用户摘要', async () => {
+    vi.stubGlobal('navigator', { ...navigator, locks: new FakeLockManager() })
+    frontendTools.executeFrontendTool.mockResolvedValue({
+      outcome: 'failed',
+      availability: 'degraded',
+      result: '界面写入：结论：未写入。下一步：重新 ui_snapshot',
+      userTextCode: 'UI_PRECONDITION_CHANGED'
+    })
+    const store = useAiStore()
+    store.activeRunId = 'run-p03'
+    const { message, frame } = armTool(store)
+    await store.runFrontendTool(message, frame)
+    expect(toolPart(message, 'p1')).toMatchObject({
+      result: '界面写入：结论：未写入。下一步：重新 ui_snapshot',
+      userTextCode: 'UI_PRECONDITION_CHANGED'
+    })
+    expect(store.noticeCode).toBe('ai.panel.toolResult.UI_PRECONDITION_CHANGED')
+    expect(api.frontendToolResult).toHaveBeenCalledWith(
+      expect.objectContaining({ result: '界面写入：结论：未写入。下一步：重新 ui_snapshot' }),
+      expect.anything()
+    )
+  })
+})
+
+
+describe('定稿：恢复执行事实未知的用户投影', () => {
+  it('不重复执行，模型保留未知结局回执，用户摘要要求先核对页面', async () => {
+    const store = useAiStore()
+    store.activeRunId = 'run-p03'
+    const { message, frame } = armTool(store, 'uncertain-copy')
+    await store.runFrontendTool(message, frame)
+    expect(frontendTools.executeFrontendTool).not.toHaveBeenCalled()
+    expect(toolPart(message, 'uncertain-copy')).toMatchObject({
+      status: 'unknown',
+      result: '恢复时无法确认此前是否已执行；本页签没有再次执行，请人工核对后再继续。',
+      userTextCode: 'UNCERTAIN_RECOVERY'
+    })
   })
 })
