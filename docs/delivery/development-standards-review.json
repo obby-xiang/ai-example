@@ -9779,6 +9779,67 @@
           "reason": "原三项RED/GREEN与最终单方法复验通过；本轮实时done/error false、跨页签true、本地stop和history拒绝均GREEN，两个MISSING_ACTION空条件、REFERENCES_UNRESOLVED阻断、有效条件成功及第二attempt看门狗GREEN。通知去重、用户投影、恢复条、作业同步、目录/发号、预检纯函数/发射器/真实卡面均按精确测试名单独RED后GREEN，空目录为修改前即PASS的对照。最终Maven -o -DskipTests compile实际编译364源文件成功，vue-tsc --noEmit成功；15个Java/TS/Vue生产文件执行IDEA Reformat后剔除约4.3万行历史格式噪声。IDEA build_project请求超时，未作为成功证据。旧ToolPreflightGateTest#preflightFailureNeverEntersConfirmGateAndEmitsNoCard在新断言前因既有帧序多suspended失败，旧session-purged下一次发送用例得到not-sent；均未改写断言或冒充PASS。主控返修三项分别以真实只读卡ro-reason存在、真实工具链用户码缺失、后端start_publish错误专用摘要取得RED并GREEN；中英AiPanel真实执行结果、failed/blocked原因、普通BACKEND拒绝摘要、history拒绝、实时done false、其他workspace失败均逐点复验通过。追加5个生产文件执行IDEA Reformat并剔除历史格式噪声，最终Maven compile重新编译364源文件成功、vue-tsc成功。无终帧CANCELLED快照单点先因host无stopped被写成true取得RED，最小条件修复后GREEN；同用例验证已有stopped保留，history显式stopped=true、HITL history无stopped、frame false/true/缺省兼容分别单点GREEN。ai.ts再次执行IDEA Reformat并恢复格式噪声，最终vue-tsc成功。未运行类级/批量/循环/全量测试，真实服务、浏览器、Redis、CU和子代理均NOT_RUN。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:769ae750189cef7c27a7ef5bd663c178b676ec9a55626beacf8308ec77a4b8b6",
+      "status": "reviewed",
+      "reason": "主控真实DeepSeek复测e005b4d0发现B创建卡拒绝唯一剩余FAIL：SSE、pending、run及assistant stopped均正确，但history TOOL envelope被重建为cancelled/RUN_CANCELLED，用户投影误称本轮已停止。本批对最终暂存3个生产文件逐hunk自审，cancelledRoundMessages按权威store pending的结构化status重建REJECTED、FRONTEND_CANCELLED或默认RUN_CANCELLED，并优先保留其原始resultText；run CANCELLED、assistant stopped来源、零副作用及既有模型/用户分层不变。主控已完成本批最终暂存生产diff逐hunk复核并通过，最终指纹匹配。",
+      "reviewedAt": "2026-11-27T18:59:49+08:00",
+      "reviewer": "Kimi主控逐hunk复核 / K3.1 Pro施工与单点验证",
+      "specChanges": [
+        {
+          "change": "取消收尾重建role:tool时不再统一覆盖为cancelled/RUN_CANCELLED，而是保留每个pending真实结构化结局；新增通用稳定码REJECTED并复用同一ToolResultUserText用户摘要。",
+          "reason": "snapshot inFlight可能仍是旧PENDING/空resultText，ConfirmGate已在权威store pending保留REJECTED及模型原文，旧实现忽略这些事实导致history拒绝与主动停止混用。",
+          "impact": "REJECTED重建为rejected/REJECTED并投影已拒绝本次未执行；FRONTEND_CANCELLED保留cancelled/FRONTEND_CANCELLED及已取消摘要；其他主动停止保持cancelled/RUN_CANCELLED和stopped=true。模型envelope.message继续取原始resultText，SSE/history/前端locale共用REJECTED。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "cancelledRoundMessages按toolCallId读取既有权威store pending，解决snapshot inFlight旧状态；cancelledRoundToolResult只按status分派REJECTED/FRONTEND_CANCELLED/默认RUN_CANCELLED，不匹配正文、不特判create_task。原始resultText优先取权威pending，calls配对、run终态和assistant userStopped逻辑不改。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolOutcome.java",
+          "status": "checked",
+          "reason": "新增通用CODE_REJECTED=REJECTED，与CODE_RUN_CANCELLED和CODE_FRONTEND_CANCELLED并列；既有ToolOutcome枚举wire、retryable及其他错误码不变。"
+        },
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/tool/ToolResultUserText.java",
+          "status": "checked",
+          "reason": "SUMMARIES复用CODE_REJECTED映射唯一定稿已拒绝本次未执行，userTextCode返回REJECTED；历史与实时继续共享同一用户投影入口，模型modelText不改写，不新增第二套文案。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "仅复用既有RunStore.pending、PendingToolCall.status、ToolResultEnvelope及ToolResultUserText，没有manifest、锁文件、新依赖或并行结果框架。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增常量与cancelledRoundToolResult短方法均符合既有Java形态，方法低于50行和圈复杂度20，控制块保留大括号；字符串常量安全判空，未新增集合返回、JSON实体、Lombok相等性或共享可变状态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "模型侧原始resultText及结构化code保留，用户面仅输出既有安全业务摘要；未增加异常原文、响应体或敏感信息日志，未吞错、未把拒绝或取消包装成功。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "拒绝history显示已拒绝本次未执行，主动停止仍显示本轮已停止且assistant stopped=true，前端放弃显示已取消本次操作未完成；不再把HITL拒绝误述为主动停止，run和pending真实状态保持可见。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "仅增加既有ai pending读取以取得权威结构化终态，不访问数据库、不新增Redis键或永久数据；run CANCELLED、pending REJECTED/CANCELLED、终态吸收、零副作用、工具配对及多实例恢复语义不变。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批只调整工具信封枚举、稳定码和已有字符串投影，未修改UTF-8解码、SSE分帧、代理对、字素簇或截断处理。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "真实B1首败来自主控DeepSeek复测e005b4d0，本批未冒充重新运行真实模型。CreateEntryCorrectionHitlTest#rejectedCreateTaskDoesNotCorrectAgainOrExecute先因history outcome cancelled而非rejected取得RED，修复后验证rejected/REJECTED、用户摘要、模型原文、assistant无stopped、pending REJECTED及零副作用GREEN。frontendCancelledToolKeepsFrontendCancellationInHistory先因RUN_CANCELLED而非FRONTEND_CANCELLED取得RED，恢复分支后GREEN。cancelledCreateTask补envelope/RUN_CANCELLED、history stopped=true及定稿摘要对照并GREEN；rejectedPlainStop、cancelledPlainStop和ResilientChatServiceMemoryWriteTest#parkedCancellationSettlesHistoryFramesAndEstimatedContext逐点GREEN。3个生产文件执行IDEA Reformat并剔除历史格式噪声，最终Maven -o -DskipTests compile实际重新编译364源文件成功。未运行类级/批量/循环/全量测试，未启动服务、未使用CU或子代理，前端无改动故未跑无关前端测试。"
+        }
+      }
     }
   ]
 }

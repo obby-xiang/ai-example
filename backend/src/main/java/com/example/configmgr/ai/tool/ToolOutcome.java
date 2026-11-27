@@ -93,6 +93,9 @@ public enum ToolOutcome {
 
 	public static final String CODE_RUN_CANCELLED = ErrorCodes.RUN_CANCELLED;
 
+	/** 人工拒绝当前工具调用；与主动停止整轮的 RUN_CANCELLED 分开。 */
+	public static final String CODE_REJECTED = "REJECTED";
+
 	public static final String CODE_FRONTEND_CANCELLED = ErrorCodes.FRONTEND_CANCELLED;
 
 	/** 未执行（批策略跳过）：上游工具 deterministic 失败后本调用没有执行。 */

@@ -23,7 +23,10 @@ import com.example.configmgr.ai.tool.AiContext;
 import com.example.configmgr.ai.tool.AiToolNames;
 import com.example.configmgr.ai.tool.ContextBuilder;
 import com.example.configmgr.ai.tool.ToolRegistry;
+import com.example.configmgr.ai.tool.ToolOutcome;
+import com.example.configmgr.ai.tool.ToolResultEnvelope;
 import com.example.configmgr.ai.tool.ToolResultLimiter;
+import com.example.configmgr.ai.tool.ToolResultUserText;
 import com.example.configmgr.ai.tools.AiTools;
 import com.example.configmgr.ai.web.AiChatRequest;
 import com.example.configmgr.data.entity.ConfigDataRow;
@@ -741,6 +744,8 @@ class CreateEntryCorrectionHitlTest {
                         .doesNotContainEntry(ResilientChatService.STOPPED_KEY, true));
         assertThat(settledHistory).anyMatch(message -> message instanceof ToolResponseMessage responses
                 && responses.getResponses().stream().anyMatch(response -> CORRECTED_CALL_ID.equals(response.id())));
+        assertHistoryToolResult(settledHistory, CORRECTED_CALL_ID, "rejected", "REJECTED", "已拒绝，本次未执行。",
+                this.store.pending(RUN_ID, CORRECTED_CALL_ID).getResultText());
         assertTemporaryMarkerAbsent(this.store.get(RUN_ID));
         List<Map<String, Object>> frames = FrameWire.normalize(this.store.events(RUN_ID));
         assertThat(frames).filteredOn(frame -> "done".equals(frame.get("type"))).singleElement()
@@ -799,12 +804,46 @@ class CreateEntryCorrectionHitlTest {
 
         assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
         assertThat(this.store.pending(RUN_ID, CORRECTED_CALL_ID).getStatus()).isEqualTo(PendingToolCall.CANCELLED);
+        List<Message> settledHistory = this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson());
+        assertThat(settledHistory).anyMatch(message -> message instanceof AssistantMessage assistant
+                && Boolean.TRUE.equals(assistant.getMetadata().get(ResilientChatService.STOPPED_KEY)));
+        assertHistoryToolResult(settledHistory, CORRECTED_CALL_ID, "cancelled", "RUN_CANCELLED",
+                "本轮已停止，该操作未执行。", this.store.pending(RUN_ID, CORRECTED_CALL_ID).getResultText());
         assertThat(this.store.archivedTypes(RUN_ID)).containsOnlyOnce("confirm_request");
         verifyNoInteractions(this.taskService);
         verifyNoInteractions(this.jobService);
         org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
                 .chatCompletionStream(any(ChatCompletionRequest.class), any());
         assertTemporaryMarkerAbsent(this.store.get(RUN_ID));
+    }
+
+    @Test
+    void frontendCancelledToolKeepsFrontendCancellationInHistory() throws Exception {
+        useRealChatClient();
+        useEmptyEvidence();
+        unresolvedThenCorrected(AiToolNames.CREATE_TASK, ARGUMENTS);
+        chat();
+        PendingToolCall pending = this.store.pending(RUN_ID, CORRECTED_CALL_ID);
+        pending.setStatus(PendingToolCall.FRONTEND_CANCELLED);
+        pending.setOutcome(ToolOutcome.CANCELLED.wire());
+        pending.setCode(ToolOutcome.CODE_FRONTEND_CANCELLED);
+        pending.setResultText("前端原始放弃回执");
+        this.store.putPending(RUN_ID, pending);
+
+        try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+                com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
+            this.service.cancelParkedForDecision(RUN_ID);
+        }
+
+        List<Message> settledHistory = this.codec.deserializeAll(this.store.get(RUN_ID).getMessageJson());
+        assertHistoryToolResult(settledHistory, CORRECTED_CALL_ID, "cancelled", "FRONTEND_CANCELLED",
+                "已取消，本次操作未完成。", "前端原始放弃回执");
+        assertThat(settledHistory).filteredOn(AssistantMessage.class::isInstance)
+                .map(AssistantMessage.class::cast)
+                .allSatisfy(assistant -> assertThat(assistant.getMetadata())
+                        .doesNotContainEntry(ResilientChatService.STOPPED_KEY, true));
+        verifyNoInteractions(this.taskService);
+        verifyNoInteractions(this.jobService);
     }
 
     @Test
@@ -1168,6 +1207,25 @@ class CreateEntryCorrectionHitlTest {
                 .singleElement().satisfies(entry -> assertThat(entry.toolCalls()).singleElement().satisfies(call ->
                         assertThat(call.arguments()).isEqualTo(ARGUMENTS)));
         assertThat(currentEntries).allSatisfy(entry -> assertThat(String.valueOf(entry.text())).doesNotContain("前驱正文"));
+    }
+
+    private void assertHistoryToolResult(List<Message> history, String toolCallId, String outcome, String code,
+                                         String userText, String modelText) throws Exception {
+        ToolResponseMessage.ToolResponse response = history.stream()
+                .filter(ToolResponseMessage.class::isInstance)
+                .map(ToolResponseMessage.class::cast)
+                .flatMap(message -> message.getResponses().stream())
+                .filter(item -> toolCallId.equals(item.id()))
+                .findFirst().orElseThrow();
+        ToolResultEnvelope envelope = this.mapper.readValue(response.responseData(), ToolResultEnvelope.class);
+        assertThat(envelope.outcome()).isEqualTo(outcome);
+        assertThat(envelope.code()).isEqualTo(code);
+        if (modelText != null) {
+            assertThat(envelope.message()).isEqualTo(modelText);
+        }
+        assertThat(ToolResultUserText.userTextCode(response.name(), envelope.code(), envelope.target())).isEqualTo(code);
+        assertThat(ToolResultUserText.forUser(response.name(), envelope.code(), envelope.message(), envelope.target()))
+                .isEqualTo(userText);
     }
 
     private void plainStopThenCorrectedCreateTask() {

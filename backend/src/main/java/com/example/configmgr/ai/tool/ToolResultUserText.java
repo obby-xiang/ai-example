@@ -63,6 +63,8 @@ public final class ToolResultUserText {
                     "这一步没有在时限内完成，结果尚未确认；该操作可能已产生部分变化，请核对后再继续。"),
             Map.entry(ErrorCodes.TOOL_ALREADY_CLAIMED,
                     "系统正在处理该操作，本次没有重复执行。"),
+            Map.entry(ToolOutcome.CODE_REJECTED,
+                    "已拒绝，本次未执行。"),
             Map.entry(ErrorCodes.RUN_CANCELLED,
                     "本轮已停止，该操作未执行。"),
             Map.entry(ErrorCodes.FRONTEND_CANCELLED,

@@ -3507,7 +3507,7 @@ public class ResilientChatService {
      *     {@code RunStore#saveSuspended} 落盘、续跑侧 {@code ResumeService#rebuildAssistant} 同源重建），
      *     这里按同一映射重建一条 assistant 消息（正文 = 半截正文，可为空）；仅主动停止整轮时带
      *     {@code stopped}，HITL 拒绝或放弃当前动作不得伪装成主动停止；</li>
-     * <li>再补一条**配对**的 {@code role:tool}（结局 = 取消）—— 悬空的 {@code tool_calls} 会让下一轮
+     * <li>再补一条**配对**的 {@code role:tool}（按条目真实结构化结局）—— 悬空的 {@code tool_calls} 会让下一轮
      *     请求被上游以"tool_calls 没有对应 tool 响应"拒绝，配对完整性是记忆面的硬约束；</li>
      * <li>历史里已经出现过该 toolCallId（异常流程下的重复挂起）时不重复造消息。</li>
      * </ol>
@@ -3529,9 +3529,11 @@ public class ResilientChatService {
                     ObjectUtils.defaultIfNull(item.getType(), "function"), item.getName(), item.getArguments()));
             String text = StringUtils.isNotBlank(item.getResultText()) ? item.getResultText()
                     : userStopped ? "本轮对话已被用户取消，该工具未执行。" : "本轮对话已结束，该工具未执行。";
+            PendingToolCall settled = this.store.pending(snapshot.getRunId(), item.getToolCallId());
+            String resultText = settled != null && StringUtils.isNotBlank(settled.getResultText())
+                    ? settled.getResultText() : text;
             responses.add(new ToolResponseMessage.ToolResponse(item.getToolCallId(), item.getName(),
-                    ToolResultEnvelope.of(ToolOutcome.CANCELLED, ToolOutcome.CODE_RUN_CANCELLED, text,
-                            item.getArguments()).toJson()));
+                    cancelledRoundToolResult(settled == null ? item : settled, resultText).toJson()));
         }
         List<Message> out = new ArrayList<>(2);
         if (!StringUtils.isNotBlank(partial) && calls.isEmpty()) {
@@ -3554,6 +3556,17 @@ public class ResilientChatService {
             out.add(ToolResponseMessage.builder().responses(responses).build());
         }
         return out;
+    }
+
+    private static ToolResultEnvelope cancelledRoundToolResult(PendingToolCall item, String text) {
+        if (PendingToolCall.REJECTED.equals(item.getStatus())) {
+            return ToolResultEnvelope.of(ToolOutcome.REJECTED, ToolOutcome.CODE_REJECTED, text, item.getArguments());
+        }
+        if (PendingToolCall.FRONTEND_CANCELLED.equals(item.getStatus())) {
+            return ToolResultEnvelope.of(ToolOutcome.CANCELLED, ToolOutcome.CODE_FRONTEND_CANCELLED, text,
+                    item.getArguments());
+        }
+        return ToolResultEnvelope.of(ToolOutcome.CANCELLED, ToolOutcome.CODE_RUN_CANCELLED, text, item.getArguments());
     }
 
     /**
