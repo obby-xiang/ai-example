@@ -7,6 +7,7 @@ import com.example.configmgr.ai.config.ProviderRuntime;
 import com.example.configmgr.ai.conformance.InMemoryRunStore;
 import com.example.configmgr.ai.gate.CreateTaskReferenceResolver;
 import com.example.configmgr.ai.history.ConversationTranscriptStore;
+import com.example.configmgr.ai.history.SyntheticMessages;
 import com.example.configmgr.ai.memory.MessageJsonCodec;
 import com.example.configmgr.ai.session.AiSessionService;
 import com.example.configmgr.ai.slot.TaskSlotResolver;
@@ -20,13 +21,17 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.tool.ToolCallback;
 import org.springframework.ai.tool.definition.ToolDefinition;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -124,9 +129,12 @@ class CreateEntryCorrectionTest {
         when(this.providerRegistry.current()).thenReturn(runtime());
         when(this.providerRegistry.tryCurrent()).thenReturn(Optional.of(runtime()));
         when(this.providerRegistry.forRequest(any(), any(), any())).thenReturn(runtime());
+        when(this.providerRegistry.forReasoningRecovery(any(), any())).thenAnswer(invocation -> invocation.getArgument(0));
         ToolCallback createTask = mock(ToolCallback.class);
         ToolDefinition definition = mock(ToolDefinition.class);
         when(definition.name()).thenReturn(AiToolNames.CREATE_TASK);
+        when(definition.description()).thenReturn("Create an import or export task after explicit user intent");
+        when(definition.inputSchema()).thenReturn("{\"type\":\"object\",\"properties\":{\"type\":{\"type\":\"string\"}}}");
         when(createTask.getToolDefinition()).thenReturn(definition);
         when(this.toolRegistry.forContext(any(AiContext.class))).thenReturn(List.of(createTask));
         answers("首次原文", "第二次原文");
@@ -138,13 +146,15 @@ class CreateEntryCorrectionTest {
     }
 
     @Test
-    void unresolvedCreateTaskNeedsOneCorrectionButPureAnswerDoesNot() {
+    void unresolvedReferencesOrMissingCreateActionNeedOneCorrection() {
         PendingToolCall unresolved = unresolved();
 
         assertThat(ResilientChatService.needsCreateEntryCorrection(true, tasks("EXPORT"), true,
                 List.of(unresolved), List.of(), false)).isTrue();
         assertThat(ResilientChatService.needsCreateEntryCorrection(true, tasks("EXPORT"), true,
-                List.of(), List.of(), false)).isFalse();
+                List.of(), List.of(), false)).isTrue();
+        assertThat(ResilientChatService.needsCreateEntryCorrection(true, tasks("EXPORT"), true,
+                List.of(), List.of(Map.of("name", AiToolNames.LIST_TASKS, "executed", true)), false)).isTrue();
     }
 
     @Test
@@ -175,26 +185,42 @@ class CreateEntryCorrectionTest {
     }
 
     @Test
-    void plainAnswerWithoutCreateTaskDoesNotRequestCorrection() {
+    void secondPlainAnswerFinishesWithOnlyFirstTextAndSingleCorrection() {
         chat("run-create-plain-twice", "Create an export task");
 
         verify(this.chatClient).prompt();
-        verify(this.chatModel, never()).stream(any(Prompt.class));
+        verify(this.chatModel, times(1)).stream(any(Prompt.class));
         RunSnapshot snapshot = this.store.get("run-create-plain-twice");
         assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.DONE);
         assertThat(snapshot.getFinalText()).isEqualTo("首次原文");
         assertThat(AiContext.fromMap(snapshot.getContext()).getExtra())
-                .doesNotContainKeys("createEntryCorrectionUsed", "createTaskCorrectionUsed");
+                .containsEntry("createEntryCorrectionUsed", true)
+                .doesNotContainKey("createTaskCorrectionUsed");
         verify(this.emitter, times(1)).delta("首次原文");
         verify(this.emitter, never()).delta("第二次原文");
         assertThat(this.store.pendingsLenient("run-create-plain-twice")).isEmpty();
+
+        ArgumentCaptor<Prompt> prompt = ArgumentCaptor.forClass(Prompt.class);
+        verify(this.chatModel).stream(prompt.capture());
+        List<Message> history = prompt.getValue().getInstructions();
+        assertThat(history).anyMatch(message -> message instanceof UserMessage user
+                && "Create an export task".equals(user.getText()) && !SyntheticMessages.isSynthetic(user));
+        assertThat(history.getLast()).isInstanceOfSatisfying(UserMessage.class, correction -> {
+            assertThat(SyntheticMessages.kindOf(correction)).isEqualTo(SyntheticMessages.Kind.CORRECTION);
+            assertThat(correction.getText()).contains(AiToolNames.CREATE_TASK)
+                    .contains("createTaskSchema").contains("明确创建").contains("纯问答")
+                    .doesNotContain("submit_action_plan");
+        });
+        ToolCallingChatOptions options = (ToolCallingChatOptions) prompt.getValue().getOptions();
+        assertThat(options.getToolCallbacks()).singleElement().satisfies(callback ->
+                assertThat(callback.getToolDefinition().name()).isEqualTo(AiToolNames.CREATE_TASK));
     }
 
     @Test
     void pureQuestionHasNoCreationCardOrDuplicateVisibleAnswer() {
         chat("run-create-question", "How do I create a task?");
 
-        verify(this.chatModel, never()).stream(any(Prompt.class));
+        verify(this.chatModel, times(1)).stream(any(Prompt.class));
         RunSnapshot snapshot = this.store.get("run-create-question");
         assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.DONE);
         assertThat(snapshot.getFinalText()).isEqualTo("首次原文");

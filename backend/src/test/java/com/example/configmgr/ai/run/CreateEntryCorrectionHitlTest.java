@@ -744,6 +744,52 @@ class CreateEntryCorrectionHitlTest {
     }
 
     @Test
+    void rejectedPlainStopCorrectionDoesNotCorrectAgainOrExecute() throws Exception {
+        useRealChatClient();
+        plainStopThenCorrectedCreateTask();
+        chat();
+        assertPlainStopCorrectionParked();
+
+        ConfirmGate.Submission submission = submitDecision(RUN_ID, CORRECTED_CALL_ID, false);
+
+        assertThat(submission.outcome()).isEqualTo(ConfirmGate.Outcome.ACCEPTED);
+        assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+        assertThat(this.store.pending(RUN_ID, CORRECTED_CALL_ID).getStatus()).isEqualTo(PendingToolCall.REJECTED);
+        assertThat(this.store.archivedTypes(RUN_ID)).containsOnlyOnce("confirm_request");
+        verifyNoInteractions(this.taskService);
+        verifyNoInteractions(this.jobService);
+        assertThat(this.store.ledger(RUN_ID)).noneMatch(record -> AiToolNames.CREATE_TASK.equals(record.get("name"))
+                && Boolean.TRUE.equals(record.get("executed")));
+        org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
+                .chatCompletionStream(any(ChatCompletionRequest.class), any());
+        assertTemporaryMarkerAbsent(this.store.get(RUN_ID));
+    }
+
+    @Test
+    void cancelledPlainStopCorrectionDoesNotCorrectAgainOrExecute() throws Exception {
+        useRealChatClient();
+        plainStopThenCorrectedCreateTask();
+        chat();
+        assertPlainStopCorrectionParked();
+
+        try (com.example.configmgr.ai.tenant.RequestContextUtils.SafeCloseable ignored =
+                com.example.configmgr.ai.tenant.RequestContextUtils.useContext(1L, 101L)) {
+            this.service.cancelParked(RUN_ID);
+        }
+
+        assertThat(this.store.get(RUN_ID).getStatus()).isEqualTo(RunSnapshot.CANCELLED);
+        assertThat(this.store.pending(RUN_ID, CORRECTED_CALL_ID).getStatus()).isEqualTo(PendingToolCall.CANCELLED);
+        assertThat(this.store.archivedTypes(RUN_ID)).containsOnlyOnce("confirm_request");
+        verifyNoInteractions(this.taskService);
+        verifyNoInteractions(this.jobService);
+        assertThat(this.store.ledger(RUN_ID)).noneMatch(record -> AiToolNames.CREATE_TASK.equals(record.get("name"))
+                && Boolean.TRUE.equals(record.get("executed")));
+        org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
+                .chatCompletionStream(any(ChatCompletionRequest.class), any());
+        assertTemporaryMarkerAbsent(this.store.get(RUN_ID));
+    }
+
+    @Test
     void preflightFailureDoesNotCorrectAgainOrEnterConfirmGate() {
         useRealChatClient();
         String invalid = ARGUMENTS;
@@ -1030,6 +1076,40 @@ class CreateEntryCorrectionHitlTest {
                 .singleElement().satisfies(entry -> assertThat(entry.toolCalls()).singleElement().satisfies(call ->
                         assertThat(call.arguments()).isEqualTo(ARGUMENTS)));
         assertThat(currentEntries).allSatisfy(entry -> assertThat(String.valueOf(entry.text())).doesNotContain("前驱正文"));
+    }
+
+    private void plainStopThenCorrectedCreateTask() {
+        when(this.api.chatCompletionStream(any(ChatCompletionRequest.class), any()))
+                .thenReturn(Flux.just(textChunk("首次纯文本")),
+                        Flux.just(toolCallChunk(CORRECTED_CALL_ID, AiToolNames.CREATE_TASK, ARGUMENTS)));
+    }
+
+    private void assertPlainStopCorrectionParked() {
+        RunSnapshot snapshot = this.store.get(RUN_ID);
+        assertThat(snapshot.getStatus()).isEqualTo(RunSnapshot.SUSPENDED);
+        assertThat(snapshot.getAssistantContent()).isEqualTo("首次纯文本");
+        assertThat(AiContext.fromMap(snapshot.getContext()).getExtra())
+                .containsEntry("createEntryCorrectionUsed", true);
+        assertThat(this.store.pendingsLenient(RUN_ID)).singleElement().satisfies(pending -> {
+            assertThat(pending.getToolCallId()).isEqualTo(CORRECTED_CALL_ID);
+            assertThat(pending.getStatus()).isEqualTo(PendingToolCall.PENDING);
+        });
+        assertThat(this.store.archivedTypes(RUN_ID)).containsOnlyOnce("confirm_request");
+        verifyNoInteractions(this.taskService);
+        verifyNoInteractions(this.jobService);
+
+        ArgumentCaptor<ChatCompletionRequest> upstream = ArgumentCaptor.forClass(ChatCompletionRequest.class);
+        org.mockito.Mockito.verify(this.api, org.mockito.Mockito.times(2))
+                .chatCompletionStream(upstream.capture(), any());
+        ChatCompletionRequest correction = upstream.getAllValues().get(1);
+        assertThat(correction.messages()).anyMatch(message -> message.role() == ChatCompletionMessage.Role.USER
+                && "Create an export task".equals(message.content()));
+        assertThat(correction.messages().getLast().content()).contains(AiToolNames.CREATE_TASK)
+                .contains("createTaskSchema").contains("明确创建").contains("纯问答")
+                .doesNotContain("references unresolved").doesNotContain("submit_action_plan");
+        assertThat(correction.tools()).singleElement().satisfies(tool ->
+                assertThat(tool.getFunction().getName()).isEqualTo(AiToolNames.CREATE_TASK));
+        assertThat(correction.toolChoice()).isNull();
     }
 
     private void unresolvedThenCorrected(String name, String arguments) {

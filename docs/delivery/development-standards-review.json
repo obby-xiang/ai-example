@@ -9497,6 +9497,62 @@
           "reason": "本次仅文档收尾，按禁令测试、CU和子代理均NOT_RUN；三轮3/3 PASS来自<deepseek-evidence-cny-38e8baab>/report.md的既有真实证据，不声称本轮重新执行。两份文档已逐段审查且git diff --cached --check通过，其他场景与CI不外推。"
         }
       }
+    },
+    {
+      "fingerprint": "sha256:51885111db56b79a3a141f1f309b8d2e1c54f347f22606360bc833f84a51bc1f",
+      "status": "reviewed",
+      "reason": "K3.1 Pro对ResilientChatService最终暂存hunk逐段自审：零工具非空纯文本STOP与恰一个未决create_task分别进入同一单次correction；空pending但存在未决ledger、任何其他create_task记录、非首轮、未披露、已绑定或已复核均拒绝。原requireCreateEntryCorrectionAllowed在标记前及第二次上游前保留，拒绝和取消继续使用终态吸收、confirm_request去重及瞬态清理。主控复核发现旧指纹把非create_task只读ledger误判为抑制条件；本轮以LIST_TASKS已执行ledger单点RED复现后改为只按createTaskLedger判定，其他工具pending仍保持fail-closed。主控已对最终暂存区逐hunk复核通过，纳管指纹匹配。",
+      "reviewedAt": "2026-11-27T12:53:30+08:00",
+      "reviewer": "Kimi 主控逐 hunk 复核 / K3.1 Pro 施工与单点验证",
+      "specChanges": [
+        {
+          "change": "恢复originalFirstTurn中create_task已披露、未绑定taskId、无任何create_task pending/ledger记录且首轮以零工具非空纯文本STOP结束时的一次通用agent循环复核；第二次仍输出文字则正常DONE。",
+          "reason": "真实Flash模型会在已披露create_task时首次STOP纯文本且toolCalls=0，39a078e2的未决引用窄化使该遗漏不再被复核。",
+          "impact": "第二次请求仅披露create_task并携带原始对话和Schema，由模型区分明确创建与纯问答；不强制toolChoice，不新增意图解析器，不自动创建或绕过HITL，每run最多一次。空pending时，空ledger或仅其他工具ledger均允许遗漏复核，只有未决create_task ledger的异常缺pending形态保持抑制。"
+        },
+        {
+          "change": "创建correction同时覆盖首次纯文本后产生确认卡的拒绝和取消路径，并保持任何既有create_task事实及读取失败的fail-closed抑制。",
+          "reason": "恢复通用复核不能重弹用户已拒绝或取消的创建卡，也不能在run/clientRequest取消后发出第二次上游。",
+          "impact": "拒绝或取消后run为CANCELLED、pending为REJECTED/CANCELLED、confirm_request仅一次，无任务、作业或第三跳；刷新恢复沿用永久used标记和既有瞬态marker清理，不复活终态。"
+        }
+      ],
+      "files": [
+        {
+          "path": "backend/src/main/java/com/example/configmgr/ai/run/ResilientChatService.java",
+          "status": "checked",
+          "reason": "isCreateEntryCorrectionDue区分零工具纯文本STOP与未决引用收尾；createEntryCorrectionDue共享严格事实读取和取消门控，needsCreateEntryCorrection只在无事实或恰一个未决项时放行；通用指令复用createEntryCorrectionTools、correctionHistory、persistCorrectionHistory及suppressVisibleOutput，未决目录/未决项/Schema分支保持原样。"
+        }
+      ],
+      "domains": {
+        "dependency-reuse": {
+          "status": "not-affected",
+          "reason": "本批仅修改既有Java类及测试，复用Apache Commons CollectionUtils、ObjectUtils、StringUtils和既有ToolCallback，没有manifest、锁文件或新库变化。"
+        },
+        "java-api-style": {
+          "status": "checked",
+          "reason": "新增及触及方法均低于50行和圈复杂度20，控制块保留大括号，集合空值经ObjectUtils/CollectionUtils处理，JDK21单元素使用getFirst；未新增import、JSON实体、Lombok相等性或共享可变状态。"
+        },
+        "logging-exception-safety": {
+          "status": "checked",
+          "reason": "create action missing与references unresolved分别记录英文INFO且只含runId，发送日志只含runId和字符数；严格事实读取失败继续英文WARN并将Throwable置末，不记录用户正文、Schema或上游响应。"
+        },
+        "toc-interaction": {
+          "status": "checked",
+          "reason": "第二次可见正文仍由suppressVisibleOutput抑制，首次正文、prefix和transcript持久化机制不变；明确创建只进入原create_task确认卡，纯问答无创建卡或重复正文，未修改前端和i18n。"
+        },
+        "protocol-redis-concurrency": {
+          "status": "checked",
+          "reason": "每run由correcting与永久used标记限制一次；任何PENDING、REJECTED、CANCELLED、已执行或其他create_task事实均不再correction，run/clientRequest取消在第二次上游前检查。未新增Redis键、数据库访问、线程池或模型并发旁路，终态吸收及恢复语义保持原实现。"
+        },
+        "unicode-stream-parsing": {
+          "status": "not-affected",
+          "reason": "本批只读取已完整累积的finish、toolCalls和文本是否非空，未修改UTF-8解码、SSE分帧、代理对、字素簇或截断逻辑。"
+        },
+        "verification-review": {
+          "status": "checked",
+          "reason": "首轮5个新增或改规格方法均先单独取得缺少零工具复核的RED并逐一GREEN，另14个取消竞态、非STOP、记录抑制、读取失败及原未决HITL方法逐点GREEN。主控返修轮以空pending加已执行LIST_TASKS ledger取得false的RED，修正后该方法及secondPlainAnswer、两个plainStop拒绝/取消、原未决HITL共5个指定方法逐一GREEN；未运行类级或批量测试。生产文件再次执行IDEA Reformat Code结果为ok；本轮首个GREEN实际编译364个生产源文件成功，最终Maven -DskipTests -Dmaven.compiler.useIncrementalCompilation=false compile退出0。真实模型、服务和Redis均为NOT_RUN。"
+        }
+      }
     }
   ]
 }

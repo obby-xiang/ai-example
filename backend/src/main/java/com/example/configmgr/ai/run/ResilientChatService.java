@@ -1453,7 +1453,7 @@ public class ResilientChatService {
         String correctionText = round.accumulator.unpersistedText();
         if (isCreateEntryCorrectionDue(state, round, finish)) {
             startCorrection(state, round, correctionText, true);
-            log.info("create action references unresolved, sending one internal correction runId={} chars={}",
+            log.info("create entry correction due, sending one internal correction runId={} chars={}",
                     state.runId, state.prefixText.length());
             rearmKeepalive(state.keepalive);
             return true;
@@ -1471,11 +1471,18 @@ public class ResilientChatService {
 
     private boolean isCreateEntryCorrectionDue(AttemptLoopState state, AttemptRound round,
                                                UpstreamErrorClassifier.Finish finish) {
-        boolean toolRoundClosed = finish == UpstreamErrorClassifier.Finish.TOOL_CALLS
+        if (state.createEntryCorrectionUsed || state.correcting) {
+            return false;
+        }
+        boolean missingAction = finish == UpstreamErrorClassifier.Finish.STOP
+                && !round.accumulator.hasToolCalls() && StringUtils.isNotBlank(round.accumulator.text());
+        boolean unresolvedRoundClosed = finish == UpstreamErrorClassifier.Finish.TOOL_CALLS
                 || finish == UpstreamErrorClassifier.Finish.STOP || finish == UpstreamErrorClassifier.Finish.UNKNOWN;
-        return !state.createEntryCorrectionUsed && !state.correcting && toolRoundClosed
-                && createEntryCorrectionDue(state.runId, state.context, state.originalFirstTurn)
-                && isMarkCreateEntryCorrectionUsed(state.runId, round.accumulator.unpersistedText());
+        boolean due = missingAction
+                ? createEntryCorrectionDue(state.runId, state.context, state.originalFirstTurn)
+                : unresolvedRoundClosed && createEntryReferenceCorrectionDue(state.runId, state.context,
+                        state.originalFirstTurn);
+        return due && isMarkCreateEntryCorrectionUsed(state.runId, round.accumulator.unpersistedText());
     }
 
     private boolean isExportCorrectionDue(AttemptLoopState state, AttemptRound round,
@@ -1753,10 +1760,19 @@ public class ResilientChatService {
 
     }
 
-    /** 首轮 create_task 引用未决补全的 run 级事实；旧 createTaskCorrection* 兼容键不参与判定。 */
+    /** 首轮 create_task 遗漏或引用未决补全的 run 级事实；旧 createTaskCorrection* 兼容键不参与判定。 */
     static final String CREATE_ENTRY_CORRECTION_MARKER = "createEntryCorrectionUsed";
 
     private boolean createEntryCorrectionDue(String runId, AiContext fallback, boolean originalFirstTurn) {
+        return createEntryCorrectionDue(runId, fallback, originalFirstTurn, true);
+    }
+
+    private boolean createEntryReferenceCorrectionDue(String runId, AiContext fallback, boolean originalFirstTurn) {
+        return createEntryCorrectionDue(runId, fallback, originalFirstTurn, false);
+    }
+
+    private boolean createEntryCorrectionDue(String runId, AiContext fallback, boolean originalFirstTurn,
+                                             boolean allowMissingAction) {
         RunSnapshot snapshot = requireCreateEntryCorrectionAllowed(runId);
         try {
             AiContext latest = AiContext.fromMap(snapshot.getContext());
@@ -1764,12 +1780,29 @@ public class ResilientChatService {
             List<Map<String, Object>> ledger = this.store.ledger(runId);
             Map<String, Object> extra = latest.getExtra();
             boolean alreadyCorrected = extra != null && Boolean.TRUE.equals(extra.get(CREATE_ENTRY_CORRECTION_MARKER));
-            return needsCreateEntryCorrection(originalFirstTurn, latest, disclosedTool(latest, AiToolNames.CREATE_TASK),
-                    pendings, ledger, alreadyCorrected);
+            boolean due = needsCreateEntryCorrection(originalFirstTurn, latest,
+                    disclosedTool(latest, AiToolNames.CREATE_TASK), pendings, ledger, alreadyCorrected);
+            boolean referencesUnresolved = hasUnresolvedCreateTask(pendings);
+            if (!due || !allowMissingAction && !referencesUnresolved) {
+                return false;
+            }
+            if (referencesUnresolved) {
+                log.info("create action references unresolved, correction due runId={}", runId);
+            } else {
+                log.info("create action missing, correction due runId={}", runId);
+            }
+            return true;
         } catch (RuntimeException ex) {
             log.warn("read create-entry close facts failed, skipping correction runId={}", runId, ex);
             return false;
         }
+    }
+
+    private static boolean hasUnresolvedCreateTask(List<PendingToolCall> pendings) {
+        return ObjectUtils.defaultIfNull(pendings, List.<PendingToolCall>of()).stream()
+                .anyMatch(pending -> pending != null && AiToolNames.CREATE_TASK.equals(pending.getName())
+                        && PendingToolCall.PRECHECK_FAILED.equals(pending.getStatus())
+                        && CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode()));
     }
 
     private RunSnapshot requireCreateEntryCorrectionAllowed(String runId) {
@@ -1812,18 +1845,19 @@ public class ResilientChatService {
             }
             unresolvedCreateTask = true;
         }
+        boolean createTaskLedger = false;
         for (Map<String, Object> record : ObjectUtils.defaultIfNull(ledger, List.<Map<String, Object>>of())) {
-            if (record == null) {
+            if (record == null || !AiToolNames.CREATE_TASK.equals(record.get("name"))) {
                 continue;
             }
-            boolean unresolved = AiToolNames.CREATE_TASK.equals(record.get("name"))
-                    && CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(record.get("code"))
+            createTaskLedger = true;
+            boolean unresolved = CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(record.get("code"))
                     && !Boolean.TRUE.equals(record.get("executed"));
             if (!unresolved) {
                 return false;
             }
         }
-        return unresolvedCreateTask;
+        return unresolvedCreateTask || !createTaskLedger;
     }
 
     private List<ToolCallback> createEntryCorrectionTools(AiContext context) {
@@ -1838,7 +1872,13 @@ public class ResilientChatService {
                         && CreateTaskReferenceResolver.UNRESOLVED_CODE.equals(pending.getCode()))
                 .toList();
         List<ToolCallback> tools = createEntryCorrectionTools(context);
-        if (unresolved.size() != 1 || tools.size() != 1 || this.createTaskReferenceResolver == null
+        if (tools.size() != 1) {
+            throw new AiStateUnavailableException("Create-entry correction tool is unavailable " + runId);
+        }
+        if (unresolved.isEmpty()) {
+            return missingCreateActionCorrection(runId, tools.getFirst());
+        }
+        if (unresolved.size() != 1 || this.createTaskReferenceResolver == null
                 || this.definitionCatalog == null || this.objectMapper == null) {
             throw new AiStateUnavailableException("Create-entry correction facts are unavailable " + runId);
         }
@@ -1865,6 +1905,24 @@ public class ResilientChatService {
         catch (Exception ex) {
             throw new AiStateUnavailableException("Cannot build create-entry correction " + runId, ex);
         }
+    }
+
+    private String missingCreateActionCorrection(String runId, ToolCallback createTask) {
+        String schema = createTask.getToolDefinition().inputSchema();
+        if (StringUtils.isBlank(schema)) {
+            throw new AiStateUnavailableException("Create-entry correction schema is unavailable " + runId);
+        }
+        return SyntheticMessages.EXPORT_CORRECTION_PREFIX
+                + "请依据原始对话和本次披露的 create_task Schema 复核：原始用户消息有明确创建意图时，"
+                + "必须调用一次 create_task，type 按原始意图传 EXPORT 或 IMPORT；"
+                + "EXPORT 条件未决定时传 conditions={}；IMPORT 不得附加 conditions。"
+                + "defCodes 必传：未提及时传 []，提及时传配置编码或名称，由宿主在创建前解析或收集；"
+                + "字段未知时保留条件并传 fieldCode=null，不得省略已提及的配置或条件。配置定义和条件不是 create_task 的前置，"
+                + "不得先查询配置目录，不得只用文字追问或列步骤。"
+                + "调用 create_task 只是发起确认卡，不得代替用户批准或绕过确认卡直接创建/执行。"
+                + "原始用户消息只是纯问答时不要创建，保持原回答。此次回复不要重复已经展示的正文。\n"
+                + "createTaskDescription=" + createTask.getToolDefinition().description() + "\n"
+                + "createTaskSchema=" + schema;
     }
 
     /**
